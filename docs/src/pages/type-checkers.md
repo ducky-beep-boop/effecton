@@ -7,7 +7,7 @@ description: effecton officially supports ty. Set up its language server, and le
 
 An effect's type is its contract: `Effect[A, E, R]` records what it succeeds with, every error it can fail with, and every requirement it still needs. That contract is only as good as the type checker that reads it, and effecton leans on features that Python type checkers support unevenly.
 
-**[ty](https://docs.astral.sh/ty/) is the only officially supported type checker.** effecton is developed and tested against it: the library's type behavior is pinned in ty-checked tests, and every snippet on this site is type-checked by ty at build time. Other checkers can still read effecton code, but they lose precision in the places described [below](#subtracting-from-unions).
+**[ty](https://docs.astral.sh/ty/) is the only officially supported type checker.** effecton is developed and tested against it: the library's type behavior is pinned in ty-checked tests, and every snippet on this site is type-checked by ty at build time. Other checkers can still read effecton code, but they lose precision in the places described under [Type checker limitations](#type-checker-limitations).
 
 ## Setup
 
@@ -22,10 +22,14 @@ uv run ty check
 
 For the best experience, run ty as a language server in your editor, not only as a CLI step. Most of what effecton tells you is in inferred types: the error union left after a `catch`, the requirements left after a `provide`, the value a `yield from` sends back. Hovering an expression shows them while you write, the same way the hovers on this site do, and errors show up as you type instead of in CI.
 
-- **VS Code**: install the [ty extension](https://marketplace.visualstudio.com/items?itemName=astral-sh.ty). It turns off Pylance's language server by default. Keep it that way, because Pylance is built on pyright, which infers some effect types differently (see below).
+- **VS Code**: install the [ty extension](https://marketplace.visualstudio.com/items?itemName=astral-sh.ty). It turns off Pylance's language server by default. Keep it that way, because Pylance is built on pyright, which infers some effect types differently (see [Subtracting from unions](#subtracting-from-unions)).
 - **Other editors**: point your LSP client at `ty server`. The [ty editor guide](https://docs.astral.sh/ty/editors/) covers Neovim, Zed, PyCharm and others.
 
-## Subtracting from unions
+## Type checker limitations
+
+Python type checkers struggle with effect types in two places. ty handles the first precisely and needs a little help with the second.
+
+### Subtracting from unions
 
 Handling an error or providing a requirement removes one member from a union type. `catch(RecoverableError)` turns `FatalError | RecoverableError` into `FatalError`, and `provide(E.Random.Protocol)` turns `Random.Protocol | Clock.Protocol` into `Clock.Protocol`:
 
@@ -85,7 +89,7 @@ This kind of solving is where checkers differ most. Tested against effecton at t
 
 With mypy, `caught` above is `Effect[int, EffectonError, ...]`: the checker no longer knows which errors are left, and exhaustive handling of the rest becomes impossible.
 
-## Generator syntax needs a return annotation
+### Generator syntax needs a return annotation
 
 `@E.gen` programs rely on `yield from`, which runs through the generator's `Generator[Yield, Send, Return]` type. ty checks every `yield from` against the declared `E.EffectGen[A, E, R]`: an effect that fails with an undeclared error, or needs an undeclared requirement, is an `invalid-yield` error. It also types the value each `yield from` sends back. Use `yield from`, not a bare `yield`, which types the sent-back value as `Any`.
 
