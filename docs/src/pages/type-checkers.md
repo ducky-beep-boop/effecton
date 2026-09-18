@@ -93,7 +93,7 @@ With mypy, `caught` above is `Effect[int, EffectonError, ...]`: the checker no l
 
 `@E.gen` programs rely on `yield from`, which runs through the generator's `Generator[Yield, Send, Return]` type. ty checks every `yield from` against the declared `E.EffectGen[A, E, R]`: an effect that fails with an undeclared error, or needs an undeclared requirement, is an `invalid-yield` error. It also types the value each `yield from` sends back. Use `yield from`, not a bare `yield`, which types the sent-back value as `Any`.
 
-What ty does not do yet is infer that type from the body. Without the return annotation, ty types the whole program as `Effect[Unknown, Unknown, Unknown]`. The errors and requirements disappear from the type, and running the program without providing anything is not reported:
+What ty does not do yet is infer a return type from a function body. This is not specific to generators: ty types a call to any unannotated function as `Unknown`. Pyright does infer it, and reads the program below as `Effect[int, Never, Protocol]`. Without the return annotation, ty types the whole program as `Effect[Unknown, Unknown, Unknown]`. The errors and requirements disappear from the type, and running the program without providing anything is not reported:
 
 ```python
 import effecton as E
