@@ -247,7 +247,7 @@ curl -fsSL https://raw.githubusercontent.com/krzkaczor/effecton/main/.agents/ski
 ln -s ../../.agents/skills/effecton .claude/skills/effecton
 ```
 
-The agent loads the skill on its own whenever it touches code that imports effecton.
+The agent sees the skill's one-line description in every session and loads the full guide when it works on code that imports effecton; in Claude Code you can also invoke it directly as `/effecton`.
 
 ## Where next
 

@@ -1,6 +1,6 @@
 ---
 name: effecton
-description: Best practices for writing Python with effecton, the typed effect system inspired by Effect-TS (`import effecton as E`, `Effect[A, E, R]`). Use whenever you write, review, refactor or test code that imports effecton — designing typed errors, building services with Protocol/Live/Test, writing `@E.gen` programs, wrapping exception-throwing or async code, providing requirements, running effects — and whenever you work inside the effecton repository itself.
+description: Best practices for writing Python with effecton, the typed effect system inspired by Effect-TS (`import effecton as E`, `Effect[A, E, R]`). Use whenever you write, review, refactor or test code that imports effecton — designing typed errors, building services with Protocol/Live/Test, writing `@E.gen` programs, wrapping exception-throwing or async code, providing requirements, running effects.
 ---
 
 # effecton
@@ -228,31 +228,3 @@ Before finishing a change that touches effecton code, confirm:
 6. New services export `Protocol` (runtime-checkable), `Live` and `Test`, and the classes subclass the protocol.
 7. Tests follow Arrange-Act-Assert and run against `Test` implementations.
 8. The type checker and the tests pass.
-
-## Working on the effecton repository itself
-
-Everything above applies to the library's own code too, with these additions. `AGENTS.md` at the repository root is the source of truth; read it when a rule here needs more detail.
-
-**Layout.** Kernel modules live in `packages/effecton/src/effecton/`, std services in `packages/effecton/src/effecton/std/`, tests collocated as `test_<module>.py` (the release workflow strips every `test_*.py` under `src/` before publishing). Runtime dependencies are limited to typing-extensions, aiofiles and httpx2. Library internals import submodules directly (`from effecton.effect import ...`) because `E` is the error TypeVar there; only consumer code uses `import effecton as E`. `file_system.py` is the exemplar for service and error design, `packages/changesets` for program-level errors, `std/test_scope.py` for test layout.
-
-**Verification.**
-
-- `uv run ut fix` is the gate: ruff format, ruff check with fixes, `ty check`, then pytest. Run it before finishing any change.
-- Run everything through `uv run` (tasks via `uv run ut <task>`), never bare `python3`.
-- Ruff bans `pathlib`, `os.path`, `shutil`, `tempfile` and the `os` file functions outside the FileSystem and Process modules, and direct time reads and sleeps outside the clock module.
-- Every user-facing change (public API, behavior, CLI output) needs a changeset; refactors, tests, tooling and config need none. SemVer is not followed yet, so default to a patch bump: `uv run changeset add --package effecton --bump patch --message "Describe the change"`.
-- Every name exported from `effecton/__init__.py` must belong to a module listed in `packages/api-reference`'s `topics.TOPICS` table, or the docs build fails. Docs content comes from docstrings, so fix the docstring, not the generated page.
-- The docs site has its own guide in `docs/AGENTS.md`; every Python snippet there is type-checked by ty at build time (`pnpm typecheck && pnpm build`).
-
-**Type pins.** Type behavior is pinned in `src/effecton/test_types_*.py` with `assert_type` calls plus deliberate `# ty: ignore[rule]` negative assertions; `unused-ignore-comment = "error"` makes them self-checking. Every pin lives inside an underscore-prefixed function that is never called, so importing the module evaluates nothing: module level holds only imports, class definitions and plain helper functions, and decorated definitions and negative subclass pins nest inside those functions too. Prefix never-read annotated locals with an underscore (`_must_be_int: E.Effect[str] = ...`) so ruff's F841 unsafe fix doesn't strip the pin.
-
-**API naming.** Check Effect-TS for the canonical combinator name before inventing one. Diverge only when a better term fits effecton's "requirement" vocabulary: `ImplicitRequirement` instead of Context.Reference, the overloaded `suspend` decorator instead of Effect.fn.
-
-**ty inference notes** for anyone changing `Effect` or its binders:
-
-- Keep every type parameter of `Effect` out of contravariant slots in its own methods, or ty's variance inference turns it invariant: the `__iter__` send channel is `Any`, not `A`, and explicitly annotated `self` parameters use fresh method-level typevars.
-- When two classes reference each other (`Effect` ↔ `ProvideBinder`), variance inference gives up, so declare variance through old-style TypeVars (suppress UP046). A generic dataclass is inferred invariant even when frozen, so `Succeeded` and `Failure` declare covariance the same way; otherwise an `Exit` in an `Effect` method signature would turn `A` and `E` invariant.
-- R-subtraction (`provide`, `scoped`) and E-subtraction (`catch`) only solve when at most one typevar is free in the union match. Pin the subtracted type first (a class parameter on the binder, or a concrete class like `Scope`) and default the remainder (`[R2 = Never]`, `[E2 = Never]`, last in the parameter list as PEP 696 requires), so the vacuous case lands on `Never` rather than `Unknown`.
-- In `ProvideBinder.__call__` and `CatchBinder.__call__`, the class-scoped `T` must be reused as-is in the `self` annotation; re-binding it as a method typevar recreates the unsolvable two-typevar match.
-- `provide` stays curried because a one-call form lets a mismatched impl silently join into `T` and subtract too much instead of erroring; `catch` stays curried because a one-call form leaves `T` and the remainder both free, and ty pins the remainder to `Never` and rejects the call. See `src/effecton/provide.py` and `src/effecton/catch.py`.
-- Constructor calls whose return type the signature widens may need explicit specialization, because ty solves class type parameters from the arguments alone; see `catch_all` in `src/effecton/effect.py`.
