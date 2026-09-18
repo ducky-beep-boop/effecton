@@ -29,6 +29,7 @@ export default defineConfig({
     { text: 'Introduction', link: '/introduction' },
     { text: 'Getting started', link: '/getting-started' },
     { text: 'Examples', link: '/examples' },
+    { text: 'Type checkers', link: '/type-checkers' },
     {
       text: 'Core',
       items: [

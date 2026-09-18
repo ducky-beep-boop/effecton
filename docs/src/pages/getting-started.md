@@ -13,6 +13,8 @@ effecton requires Python 3.14 or later.
 uv add effecton
 ```
 
+effecton's guarantees come from the type checker, and [ty](https://docs.astral.sh/ty/) is the one it officially supports. See [Type checkers](/type-checkers) for setup and known limitations.
+
 ## Getting real
 
 Generator syntax lets you write standard generator functions (decorated with `E.gen`) that produce effects and read like async/await code. In this example, `check_secret` returns an effect that fetches a secret from a web page and checks whether it is valid. If it is not, the effect fails with a specific error.
