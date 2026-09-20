@@ -7,7 +7,7 @@ A pydantic / Effect-TS Schema style library for effecton: describe a shape once,
 - One definition yields both directions: `decode: I -> A` and `encode: A -> I`.
 - Failures travel in the typed error channel as a single `ParseError` listing every issue with its path.
 - Decoded structs are real frozen dataclasses that ty understands natively.
-- Round-trip law for every built-in schema: `encode(decode(x)) == x` for valid `x`, and `decode(encode(a)) == a`.
+- Round-trip law for every built-in schema: `decode(encode(a)) == a`, and `encode(decode(x)) == x` for canonical `x` (the string-backed built-ins accept some non-canonical text, such as `" 42 "` or a `Z` suffix, and encode the canonical form).
 
 ## Non-goals (v1)
 
@@ -48,13 +48,13 @@ Each is overloaded to accept a `Struct` subclass directly: `S.decode(User)(raw)`
 
 ## Building blocks
 
-**Primitives** — `S.String`, `S.Int`, `S.Float`, `S.Bool`, `S.Null`, `S.Unknown`, `S.Literal(*values)`. Strict, no coercion: `S.Int` rejects `bool` and `float`; `S.Float` accepts `int` and `float` but rejects `bool`.
+**Primitives** — `S.String`, `S.Int`, `S.Float`, `S.Bool`, `S.Null`, `S.Unknown`, `S.Literal(*values)`, `S.instance_of(cls)` (any instance of `cls`, unchanged both ways). Strict, no coercion: `S.Int` rejects `bool` and `float`; `S.Float` accepts `int` and `float` but rejects `bool`.
 
 **Collections** — `S.Array(item)` decodes a `list` or `tuple` to a `tuple` and encodes to a `list`; `S.Record(key, value)` decodes a mapping to a `dict`; `S.Tuple(*items)` is fixed-length; `S.Union(*members)` tries members in order on decode, and on encode picks the first member whose encode succeeds; `S.NullOr(schema)` is `Union(schema, Null)`.
 
-**Transforms** — `S.transform(from_, decode=f, encode=g)` for total conversions, and `S.transform_or_fail(from_, decode=f, encode=g)` whose functions return the value or `S.Invalid(message)`, reported as a `TransformFailed` issue. There is no `to` schema: the decoded type is inferred from `f`, and further constraints attach with `.check(...)`. Built-ins: `S.IntFromString`, `S.FloatFromString`, `S.DateTimeFromString` (ISO 8601), `S.DateFromString`, `S.PathFromString` (`E.Path`). An unexpected exception inside a user function stays a defect.
+**Transforms** — `S.transform(from_, decode=f, encode=g)` for total conversions, and `S.transform_or_fail(from_, decode=f, encode=g)` whose functions return the value or `S.Invalid(message)`, reported as a `TransformFailed` issue. The decoded type is inferred from `f`. An optional `to=` schema guards the decoded side: on encode it runs before `g`, so a wrongly typed value is a `TypeMismatch` and `g` never sees it; on decode it runs after `f`. Every built-in passes one (`S.Int`, `S.Float`, `S.instance_of(...)`; `S.DateFromString` also rejects a `datetime`). Without `to`, a transform inside a `Union`/`NullOr` can be handed values meant for another member on encode, because a union encodes through the first member whose encode succeeds. Built-ins: `S.IntFromString`, `S.FloatFromString`, `S.DateTimeFromString` (ISO 8601), `S.DateFromString`, `S.PathFromString` (`E.Path`). An unexpected exception inside a user function stays a defect.
 
-**Refinements** — `S.filter(predicate, message=...)` plus sugar `S.min_length`, `S.max_length`, `S.pattern`, `S.greater_than`, `S.greater_than_or_equal_to`, `S.less_than`, `S.less_than_or_equal_to`, each a `Check[A]` value applied through `schema.check(*checks)`. Refinements run in both directions, as in Effect-TS: encoding an invalid value fails.
+**Refinements** — `S.filter(predicate, message=...)` plus sugar `S.min_length`, `S.max_length`, `S.pattern`, `S.greater_than`, `S.greater_than_or_equal_to`, `S.less_than`, `S.less_than_or_equal_to`, each a `Check[A]` value applied through `schema.check(*checks)`. Refinements run in both directions, as in Effect-TS: encoding an invalid value fails. On encode the inner schema encodes first and the checks run only if it succeeded, so a predicate never sees a value of the wrong type. Every failing check is reported.
 
 ## Structs
 
@@ -68,7 +68,7 @@ class User(S.Struct):
 - `Struct` is marked `@dataclass_transform(frozen_default=True, kw_only_default=True, field_specifiers=(field,))` and turns each subclass into a frozen, keyword-only dataclass in `__init_subclass__`.
 - The annotation is always the decoded type. A schema is inferred for `str`, `int`, `float`, `bool`, `None`, `T | None`, `tuple[T, ...]`, `Mapping[str, T]`, `Literal[...]`, and nested `Struct` subclasses. Any other annotation without `S.field(schema)` raises `TypeError` at class definition.
 - `S.field(schema=None, *, key=None, default=MISSING)`: `key` renames the wire key; a default makes the key optional on decode. Encoding always emits every field. Mutable defaults (`dict`, `list`) are rejected, as in dataclasses.
-- Unknown input keys are ignored on decode.
+- Unknown input keys are ignored on decode. Two fields sharing a wire key raise `TypeError` at class definition. Issue paths use wire keys when decoding and field names when encoding. Nested structs must be defined before the struct that references them.
 - `S.struct_schema(User)` exposes the underlying `Schema[User, dict[str, object]]` for use inside combinators (`S.Array(S.struct_schema(User))`); `S.Array` and `S.NullOr` also accept a `Struct` class directly, as do the four entry points.
 
 ## Errors
@@ -83,7 +83,7 @@ class ParseError(EffectonError):
 type Issue = TypeMismatch | MissingKey | RefinementFailed | TransformFailed | NoUnionMember | InvalidJson
 ```
 
-Issues are plain `@final` frozen dataclasses (data, not errors), each with `path: IssuePath` and a `__str__` message. All issues in the input are collected: struct fields, array items, record entries, and tuple positions each contribute theirs. `NoUnionMember` carries the issues of every member it tried. `InvalidJson` appears at the root from `decode_json`. One error class keeps `catch(S.ParseError)` exact.
+Issues are plain `@final` frozen dataclasses (data, not errors), each with `path: IssuePath` and a `__str__` message. All issues in the input are collected: struct fields, array items, record entries, and tuple positions each contribute theirs. `NoUnionMember` carries the issues of every member it tried. `InvalidJson` appears at the root from `decode_json`, which also reports hostile text (integer digit limit, excessive nesting) instead of dying. One error class keeps `catch(S.ParseError)` exact.
 
 ## Testing
 
