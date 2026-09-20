@@ -1,4 +1,8 @@
+from collections.abc import Mapping
 from datetime import date, datetime
+from typing import Literal
+
+import pytest
 
 import effecton as E
 
@@ -11,6 +15,22 @@ def ok(value: object):
 
 def bad(*issues: S.Issue):
     return E.Failure(cause=E.Fail(S.ParseError(issues=issues)))
+
+
+class Address(S.Struct):
+    city: str
+    zip_code: str = S.field(key="zip")
+
+
+class User(S.Struct):
+    name: str
+    age: int = S.field(S.Int.check(S.greater_than_or_equal_to(0)))
+    created: datetime = S.field(S.DateTimeFromString, key="createdAt")
+    address: Address
+    role: Literal["admin", "member"] = "member"
+    nickname: str | None = None
+    tags: tuple[str, ...] = ()
+    scores: Mapping[str, int]
 
 
 def test_string_decodes_and_encodes_a_str():
@@ -392,4 +412,129 @@ def test_refinement_sugar():
     )
     assert E.run_sync_exit(S.decode(open_unit)(1)) == bad(
         S.RefinementFailed(path=(), message="expected a number less than 1", actual=1)
+    )
+
+
+RAW_USER = {
+    "name": "Ada",
+    "age": 36,
+    "createdAt": "2026-09-20T10:30:00",
+    "address": {"city": "London", "zip": "N1"},
+    "scores": {"a": 1},
+}
+
+
+def test_struct_decodes_into_a_frozen_dataclass_with_defaults():
+    r = E.run_sync_exit(S.decode(User)({**RAW_USER, "ignored": True}))
+
+    assert r == ok(
+        User(
+            name="Ada",
+            age=36,
+            created=datetime(2026, 9, 20, 10, 30),
+            address=Address(city="London", zip_code="N1"),
+            scores={"a": 1},
+        )
+    )
+
+
+def test_struct_encodes_every_field_under_its_wire_key():
+    user = User(
+        name="Ada",
+        age=36,
+        created=datetime(2026, 9, 20, 10, 30),
+        address=Address(city="London", zip_code="N1"),
+        nickname="ada",
+        tags=("a",),
+        scores={"a": 1},
+    )
+
+    r = E.run_sync_exit(S.encode(User)(user))
+
+    assert r == ok(
+        {
+            "name": "Ada",
+            "age": 36,
+            "createdAt": "2026-09-20T10:30:00",
+            "address": {"city": "London", "zip": "N1"},
+            "role": "member",
+            "nickname": "ada",
+            "tags": ["a"],
+            "scores": {"a": 1},
+        }
+    )
+
+
+def test_struct_round_trips():
+    encoded = E.run_sync(S.encode(User)(E.run_sync(S.decode(User)(RAW_USER))))
+
+    again = E.run_sync_exit(S.decode(User)(encoded))
+
+    assert again == E.run_sync_exit(S.decode(User)(RAW_USER))
+
+
+def test_struct_collects_every_issue_with_wire_key_paths():
+    raw = {
+        "name": 1,
+        "age": -1,
+        "address": {"city": "London"},
+        "role": "owner",
+        "tags": ["a", 2],
+    }
+
+    r = E.run_sync_exit(S.decode(User)(raw))
+
+    assert r == bad(
+        S.TypeMismatch(path=("name",), expected="string", actual=1),
+        S.RefinementFailed(
+            path=("age",), message="expected a number at least 0", actual=-1
+        ),
+        S.MissingKey(path=("createdAt",)),
+        S.MissingKey(path=("address", "zip")),
+        S.TypeMismatch(path=("role",), expected="'admin' | 'member'", actual="owner"),
+        S.TypeMismatch(path=("tags", 1), expected="string", actual=2),
+        S.MissingKey(path=("scores",)),
+    )
+
+
+def test_struct_rejects_non_mappings_and_foreign_instances():
+    not_a_mapping = E.run_sync_exit(S.decode(Address)([]))
+    wrong_instance = E.run_sync_exit(S.encode(Address)("x"))  # ty: ignore[invalid-argument-type]
+
+    assert not_a_mapping == bad(S.TypeMismatch(path=(), expected="object", actual=[]))
+    assert wrong_instance == bad(
+        S.TypeMismatch(path=(), expected="Address", actual="x")
+    )
+
+
+def test_struct_instances_are_frozen_and_keyword_only():
+    address = Address(city="London", zip_code="N1")
+
+    with pytest.raises(AttributeError):
+        address.city = "Paris"  # ty: ignore[invalid-assignment]
+    with pytest.raises(TypeError):
+        Address("London", "N1")  # ty: ignore[missing-argument, too-many-positional-arguments]
+
+
+def test_struct_classes_nest_inside_array_and_null_or():
+    many = E.run_sync_exit(S.decode(S.Array(Address))([{"city": "A", "zip": "1"}]))
+    none = E.run_sync_exit(S.decode(S.NullOr(Address))(None))
+    via_schema = E.run_sync_exit(
+        S.decode(S.Union(S.struct_schema(Address), S.String))("x")
+    )
+
+    assert many == ok((Address(city="A", zip_code="1"),))
+    assert none == ok(None)
+    assert via_schema == ok("x")
+
+
+def test_an_annotation_with_no_inferable_schema_fails_at_class_definition():
+    with pytest.raises(TypeError) as raised:
+
+        class Event(S.Struct):
+            at: datetime
+
+    assert str(raised.value) == (
+        "Event.at: no schema can be inferred for <class 'datetime.datetime'>; "
+        "pass one with S.field(schema)"
     )

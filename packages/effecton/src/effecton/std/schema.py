@@ -7,11 +7,14 @@ decode and encode return effects that fail with one ParseError listing
 every issue found, each tagged with the path where it occurred.
 """
 
+import dataclasses
 import re
+import typing
 from collections.abc import Callable, Iterable, Mapping, Sized
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass
 from datetime import date, datetime
-from typing import Any, Generic, TypeVar, final, overload
+from types import NoneType, UnionType
+from typing import Any, ClassVar, Generic, TypeVar, dataclass_transform, final, overload
 
 from effecton.effect import Effect, EffectonError, fail, success, sync
 from effecton.std.path import Path
@@ -169,7 +172,15 @@ def _apply_checks(checks: tuple[Check[Any], ...], value: Any, path: IssuePath) -
     return _Issues(failures) if failures else None
 
 
-def decode[A, I](schema: Schema[A, I]) -> Callable[[object], Effect[A, ParseError]]:
+@overload
+def decode[T: Struct](schema: type[T]) -> Callable[[object], Effect[T, ParseError]]: ...
+
+
+@overload
+def decode[A, I](schema: Schema[A, I]) -> Callable[[object], Effect[A, ParseError]]: ...
+
+
+def decode(schema: Any) -> Any:
     """decode(schema)(raw): turn untrusted input into a typed value."""
     resolved = _resolve(schema)
 
@@ -179,7 +190,17 @@ def decode[A, I](schema: Schema[A, I]) -> Callable[[object], Effect[A, ParseErro
     return run
 
 
-def encode[A, I](schema: Schema[A, I]) -> Callable[[A], Effect[I, ParseError]]:
+@overload
+def encode[T: Struct](
+    schema: type[T],
+) -> Callable[[T], Effect[dict[str, object], ParseError]]: ...
+
+
+@overload
+def encode[A, I](schema: Schema[A, I]) -> Callable[[A], Effect[I, ParseError]]: ...
+
+
+def encode(schema: Any) -> Any:
     """encode(schema)(value): turn a typed value back into its wire form."""
     resolved = _resolve(schema)
 
@@ -187,6 +208,61 @@ def encode[A, I](schema: Schema[A, I]) -> Callable[[A], Effect[I, ParseError]]:
         return sync(lambda: resolved._encode(value, ())).flat_map(_settle)
 
     return run
+
+
+@overload
+def field[T](schema: Schema[T, Any], *, key: str | None = None) -> T: ...
+
+
+@overload
+def field[T](schema: Schema[T, Any], *, key: str | None = None, default: T) -> T: ...
+
+
+@overload
+def field(*, key: str | None = None) -> Any: ...
+
+
+@overload
+def field[T](*, key: str | None = None, default: T) -> T: ...
+
+
+def field(
+    schema: Any = None,
+    *,
+    key: str | None = None,
+    default: Any = MISSING,
+) -> Any:
+    """Configure a Struct field: its schema, its wire key, its default.
+
+    A field with a default may be absent from the input. Without a schema,
+    one is inferred from the annotation.
+    """
+    return dataclasses.field(
+        default=default, metadata={_FIELD: _FieldSpec(schema=schema, key=key)}
+    )
+
+
+@dataclass_transform(
+    frozen_default=True, kw_only_default=True, field_specifiers=(field,)
+)
+class Struct:
+    """Subclass to declare a record: annotations are the decoded types.
+
+    Every subclass becomes a frozen, keyword-only dataclass and is itself
+    accepted wherever a schema is: decode(User)(raw).
+    """
+
+    __schema__: ClassVar[Schema[Any, dict[str, object]]]
+
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        dataclass(frozen=True, kw_only=True)(cls)
+        cls.__schema__ = _struct_schema(cls)
+
+
+def struct_schema[T: Struct](cls: type[T]) -> Schema[T, dict[str, object]]:
+    """The schema behind a Struct class, for combinators that need one."""
+    return cls.__schema__
 
 
 def Literal[T: str | int | bool | None](*values: T) -> Schema[T, T]:
@@ -201,7 +277,17 @@ def Literal[T: str | int | bool | None](*values: T) -> Schema[T, T]:
     return Schema(check, check)
 
 
-def Array[A, I](item: Schema[A, I]) -> Schema[tuple[A, ...], list[I]]:
+@overload
+def Array[T: Struct](
+    item: type[T],
+) -> Schema[tuple[T, ...], list[dict[str, object]]]: ...
+
+
+@overload
+def Array[A, I](item: Schema[A, I]) -> Schema[tuple[A, ...], list[I]]: ...
+
+
+def Array(item: Any) -> Any:
     """A list or tuple on the wire, a tuple once decoded."""
     inner = _resolve(item)
 
@@ -342,7 +428,17 @@ def Union(*members: Schema[Any, Any]) -> Any:
     return Schema(walk("_decode"), walk("_encode"))
 
 
-def NullOr[A, I](schema: Schema[A, I]) -> Schema[A | None, I | None]:
+@overload
+def NullOr[T: Struct](
+    schema: type[T],
+) -> Schema[T | None, dict[str, object] | None]: ...
+
+
+@overload
+def NullOr[A, I](schema: Schema[A, I]) -> Schema[A | None, I | None]: ...
+
+
+def NullOr(schema: Any) -> Any:
     return Union(_resolve(schema), Null)
 
 
@@ -481,7 +577,80 @@ PathFromString: Schema[Path, str] = transform(String, decode=Path, encode=str)
 def _resolve(schema: Any) -> Schema[Any, Any]:
     if isinstance(schema, Schema):
         return schema
-    raise TypeError(f"expected a Schema, got {schema!r}")
+    if isinstance(schema, type) and issubclass(schema, Struct) and schema is not Struct:
+        return schema.__schema__
+    raise TypeError(f"expected a Schema or a Struct class, got {schema!r}")
+
+
+_FIELD = "effecton.schema"
+
+
+@dataclass(frozen=True)
+class _FieldSpec:
+    schema: Schema[Any, Any] | None
+    key: str | None
+
+
+def _struct_schema(cls: type[Any]) -> Schema[Any, dict[str, object]]:
+    hints = typing.get_type_hints(cls)
+    plan: list[tuple[str, str, Schema[Any, Any], Any]] = []
+    for f in dataclasses.fields(cls):
+        spec: _FieldSpec = f.metadata.get(_FIELD, _FieldSpec(schema=None, key=None))
+        schema = spec.schema or _infer(hints[f.name], f"{cls.__name__}.{f.name}")
+        plan.append((f.name, spec.key or f.name, schema, f.default))
+
+    def decode_struct(raw: object, path: IssuePath) -> Any:
+        if not isinstance(raw, Mapping):
+            return _Issues((TypeMismatch(path, "object", raw),))
+        results: list[Any] = []
+        for _, key, schema, default in plan:
+            if key in raw:
+                results.append(schema._decode(raw[key], (*path, key)))
+            elif default is not MISSING:
+                results.append(default)
+            else:
+                results.append(_Issues((MissingKey((*path, key)),)))
+        names = [name for name, *_ in plan]
+        return _collect(lambda vs: cls(**dict(zip(names, vs, strict=True))), results)
+
+    def encode_struct(value: Any, path: IssuePath) -> Any:
+        if not isinstance(value, cls):
+            return _Issues((TypeMismatch(path, cls.__name__, value),))
+        keys = [key for _, key, *_ in plan]
+        return _collect(
+            lambda vs: dict(zip(keys, vs, strict=True)),
+            (s._encode(getattr(value, name), (*path, name)) for name, _, s, _ in plan),
+        )
+
+    return Schema(decode_struct, encode_struct)
+
+
+def _infer(annotation: Any, where: str) -> Schema[Any, Any]:
+    direct: dict[Any, Schema[Any, Any]] = {
+        str: String,
+        int: Int,
+        float: Float,
+        bool: Bool,
+        None: Null,
+        NoneType: Null,
+    }
+    if annotation in direct:
+        return direct[annotation]
+    if isinstance(annotation, type) and issubclass(annotation, Struct):
+        return annotation.__schema__
+    origin, args = typing.get_origin(annotation), typing.get_args(annotation)
+    if origin in (UnionType, typing.Union):
+        return Union(*(_infer(arg, where) for arg in args))
+    if origin is typing.Literal:
+        return Literal(*args)
+    if origin is tuple and len(args) == 2 and args[1] is Ellipsis:
+        return Array(_infer(args[0], where))
+    if origin in (Mapping, dict) and args[0] is str:
+        return Record(String, _infer(args[1], where))
+    raise TypeError(
+        f"{where}: no schema can be inferred for {annotation!r}; "
+        "pass one with S.field(schema)"
+    )
 
 
 def _settle(result: Any) -> Effect[Any, ParseError]:
