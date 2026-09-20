@@ -7,11 +7,14 @@ decode and encode return effects that fail with one ParseError listing
 every issue found, each tagged with the path where it occurred.
 """
 
-from collections.abc import Callable, Iterable, Mapping
+import re
+from collections.abc import Callable, Iterable, Mapping, Sized
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any, final, overload
 
 from effecton.effect import Effect, EffectonError, fail, success, sync
+from effecton.std.path import Path
 
 type IssuePath = tuple[str | int, ...]
 
@@ -333,6 +336,108 @@ def NullOr[A, I](schema: Schema[A, I]) -> Schema[A | None, I | None]:
     return Union(_resolve(schema), Null)
 
 
+@final
+@dataclass(frozen=True)
+class Invalid:
+    """What a transform_or_fail function returns to reject its input."""
+
+    message: str
+
+
+def transform[A, I, B](
+    from_: Schema[A, I], *, decode: Callable[[A], B], encode: Callable[[B], A]
+) -> Schema[B, I]:
+    """Map a schema's decoded side through a total function pair."""
+    return transform_or_fail(from_, decode=decode, encode=encode)
+
+
+def transform_or_fail[A, I, B](
+    from_: Schema[A, I],
+    *,
+    decode: Callable[[A], B | Invalid],
+    encode: Callable[[B], A | Invalid],
+) -> Schema[B, I]:
+    """Like transform, but either function may return Invalid(message).
+
+    An exception raised by either function is a defect, not a ParseError.
+    """
+
+    def decode_through(raw: object, path: IssuePath) -> Any:
+        inner: Any = from_._decode(raw, path)
+        if isinstance(inner, _Issues):
+            return inner
+        outer = decode(inner)
+        if isinstance(outer, Invalid):
+            return _Issues((TransformFailed(path, outer.message, inner),))
+        return outer
+
+    def encode_through(value: Any, path: IssuePath) -> Any:
+        inner = encode(value)
+        if isinstance(inner, Invalid):
+            return _Issues((TransformFailed(path, inner.message, value),))
+        return from_._encode(inner, path)
+
+    return Schema(decode_through, encode_through)
+
+
+def filter[A, I](
+    predicate: Callable[[A], bool], *, message: str
+) -> Callable[[Schema[A, I]], Schema[A, I]]:
+    """A refinement for pipe(): the predicate guards decode and encode alike."""
+
+    def refine(schema: Schema[A, I]) -> Schema[A, I]:
+        def decode_checked(raw: object, path: IssuePath) -> Any:
+            result: Any = schema._decode(raw, path)
+            if isinstance(result, _Issues) or predicate(result):
+                return result
+            return _Issues((RefinementFailed(path, message, result),))
+
+        def encode_checked(value: Any, path: IssuePath) -> Any:
+            if not predicate(value):
+                return _Issues((RefinementFailed(path, message, value),))
+            return schema._encode(value, path)
+
+        return Schema(decode_checked, encode_checked)
+
+    return refine
+
+
+def min_length[A: Sized, I](n: int) -> Callable[[Schema[A, I]], Schema[A, I]]:
+    return filter(lambda v: len(v) >= n, message=f"expected a length of at least {n}")
+
+
+def max_length[A: Sized, I](n: int) -> Callable[[Schema[A, I]], Schema[A, I]]:
+    return filter(lambda v: len(v) <= n, message=f"expected a length of at most {n}")
+
+
+def pattern[I](regex: str) -> Callable[[Schema[str, I]], Schema[str, I]]:
+    compiled = re.compile(regex)
+    return filter(
+        lambda v: compiled.search(v) is not None,
+        message=f"expected a string matching {regex}",
+    )
+
+
+def greater_than[A: float, I](n: float) -> Callable[[Schema[A, I]], Schema[A, I]]:
+    return filter(lambda v: v > n, message=f"expected a number greater than {n}")
+
+
+def greater_than_or_equal_to[A: float, I](
+    n: float,
+) -> Callable[[Schema[A, I]], Schema[A, I]]:
+    return filter(lambda v: v >= n, message=f"expected a number at least {n}")
+
+
+def less_than[A: float, I](n: float) -> Callable[[Schema[A, I]], Schema[A, I]]:
+    return filter(lambda v: v < n, message=f"expected a number less than {n}")
+
+
+def less_than_or_equal_to[A: float, I](
+    n: float,
+) -> Callable[[Schema[A, I]], Schema[A, I]]:
+    return filter(lambda v: v <= n, message=f"expected a number at most {n}")
+
+
 def _primitive[T](expected: str, accepts: Callable[[object], bool]) -> Schema[T, T]:
     # Defined before its callers: the primitives below are built at import time.
     def check(raw: Any, path: IssuePath) -> Any:
@@ -353,6 +458,35 @@ Float: Schema[float, float] = _primitive(
 Bool: Schema[bool, bool] = _primitive("boolean", lambda x: isinstance(x, bool))
 Null: Schema[None, None] = _primitive("null", lambda x: x is None)
 Unknown: Schema[object, object] = _primitive("anything", lambda _: True)
+
+
+def _parser[T](parse: Callable[[str], T], message: str) -> Callable[[str], T | Invalid]:
+    def run(text: str) -> T | Invalid:
+        try:
+            return parse(text)
+        except ValueError:
+            return Invalid(message)
+
+    return run
+
+
+IntFromString: Schema[int, str] = transform_or_fail(
+    String, decode=_parser(int, "expected an integer string"), encode=str
+)
+FloatFromString: Schema[float, str] = transform_or_fail(
+    String, decode=_parser(float, "expected a number string"), encode=str
+)
+DateTimeFromString: Schema[datetime, str] = transform_or_fail(
+    String,
+    decode=_parser(datetime.fromisoformat, "expected an ISO 8601 datetime"),
+    encode=datetime.isoformat,
+)
+DateFromString: Schema[date, str] = transform_or_fail(
+    String,
+    decode=_parser(date.fromisoformat, "expected an ISO 8601 date"),
+    encode=date.isoformat,
+)
+PathFromString: Schema[Path, str] = transform(String, decode=Path, encode=str)
 
 
 def _resolve(schema: Any) -> Schema[Any, Any]:
