@@ -28,7 +28,7 @@ type Result[T] = T | Issues          # Issues: a private wrapper around tuple[Is
 class Schema[A, I]:                  # A: decoded type, I: encoded type
     _decode: Callable[[object, IssuePath], Result[A]]
     _encode: Callable[[A, IssuePath], Result[I]]
-    def pipe(self, *fs) -> Schema[...]: ...
+    def check(self, *checks: Check[A]) -> Schema[A, I]: ...
 ```
 
 `_decode` takes `object`, not `I`: input is untrusted, so every schema checks the runtime type itself. Variance of `A` and `I` is declared with old-style TypeVars if ty's inference requires it (see the ty notes in `CLAUDE.md`).
@@ -52,9 +52,9 @@ Each is overloaded to accept a `Struct` subclass directly: `S.decode(User)(raw)`
 
 **Collections** — `S.Array(item)` decodes a `list` or `tuple` to a `tuple` and encodes to a `list`; `S.Record(key, value)` decodes a mapping to a `dict`; `S.Tuple(*items)` is fixed-length; `S.Union(*members)` tries members in order on decode, and on encode picks the first member whose encode succeeds; `S.NullOr(schema)` is `Union(schema, Null)`.
 
-**Transforms** — `S.transform(from_, decode=f, encode=g)` for total conversions, and `S.transform_or_fail(from_, decode=f, encode=g)` whose functions return the value or `S.Invalid(message)`, reported as a `TransformFailed` issue. There is no `to` schema: the decoded type is inferred from `f`, and further constraints attach with `.pipe(...)`. Built-ins: `S.IntFromString`, `S.FloatFromString`, `S.DateTimeFromString` (ISO 8601), `S.DateFromString`, `S.PathFromString` (`E.Path`). An unexpected exception inside a user function stays a defect.
+**Transforms** — `S.transform(from_, decode=f, encode=g)` for total conversions, and `S.transform_or_fail(from_, decode=f, encode=g)` whose functions return the value or `S.Invalid(message)`, reported as a `TransformFailed` issue. There is no `to` schema: the decoded type is inferred from `f`, and further constraints attach with `.check(...)`. Built-ins: `S.IntFromString`, `S.FloatFromString`, `S.DateTimeFromString` (ISO 8601), `S.DateFromString`, `S.PathFromString` (`E.Path`). An unexpected exception inside a user function stays a defect.
 
-**Refinements** — `S.filter(predicate, message=...)` plus sugar `S.min_length`, `S.max_length`, `S.pattern`, `S.greater_than`, `S.greater_than_or_equal_to`, `S.less_than`, `S.less_than_or_equal_to`, applied through `schema.pipe(...)`. Refinements run in both directions, as in Effect-TS: encoding an invalid value fails.
+**Refinements** — `S.filter(predicate, message=...)` plus sugar `S.min_length`, `S.max_length`, `S.pattern`, `S.greater_than`, `S.greater_than_or_equal_to`, `S.less_than`, `S.less_than_or_equal_to`, each a `Check[A]` value applied through `schema.check(*checks)`. Refinements run in both directions, as in Effect-TS: encoding an invalid value fails.
 
 ## Structs
 
@@ -88,8 +88,8 @@ Issues are plain `@final` frozen dataclasses (data, not errors), each with `path
 ## Testing
 
 - `test_schema.py` (Arrange-Act-Assert): per-combinator decode, encode, and round-trip; strictness cases (`bool` is not `Int`); issue accumulation with paths across nested structs and arrays; struct defaults, key renames, unknown keys, definition-time `TypeError`; union ordering; refinements failing on encode; JSON codecs and `InvalidJson`; `str(ParseError)` rendering.
-- `test_types_schema.py`: `assert_type` pins for the entry points on schemas and on `Struct` classes, `A`/`I` inference through `Array`, `transform`, `Union`, and `pipe`; struct field and `__init__` types; negative pins (encoding the wrong type, assigning to a frozen field) inside never-called underscore functions.
+- `test_types_schema.py`: `assert_type` pins for the entry points on schemas and on `Struct` classes, `A`/`I` inference through `Array`, `transform`, `Union`, and `check`; struct field and `__init__` types; negative pins (encoding the wrong type, assigning to a frozen field) inside never-called underscore functions.
 
 ## Risks
 
-A typing spike against ty 0.0.75+ verified the design: `dataclass_transform` on a base class with `__init_subclass__`, `type[T]` overloads next to `Schema[A, I]` overloads, literal-preserving `S.Literal`, refinements through `pipe`, and `field` overloads all infer and reject as intended. One quirk remains: `Schema` is invariant, so an expected type must not flow into a `S.Union(...)` call — type pins bind the schema to a local before `assert_type`.
+A typing spike against ty 0.0.75+ verified the design: `dataclass_transform` on a base class with `__init_subclass__`, `type[T]` overloads next to `Schema[A, I]` overloads, literal-preserving `S.Literal`, refinements through `pipe`, and `field` overloads all infer and reject as intended. Refinements were first designed as curried functions threaded through a `pipe` method; ty cannot solve that higher-order generic against a union-typed schema (`S.Float`, `S.NullOr(...)`, `S.Union(...)`) and yields `Unknown`. They are therefore values: `Check[A]` is contravariant in `A`, `Schema.check(*checks: Check[A])` needs no inference, and misuse (`S.Int.check(S.min_length(1))`) is a plain argument error. This matches Effect-TS v4's `schema.check(...)`. There is no `pipe`. One quirk remains: `Schema` is invariant, so an expected type must not flow into a `S.Union(...)` call — type pins bind the schema to a local before `assert_type`.
