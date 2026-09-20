@@ -538,3 +538,42 @@ def test_an_annotation_with_no_inferable_schema_fails_at_class_definition():
         "Event.at: no schema can be inferred for <class 'datetime.datetime'>; "
         "pass one with S.field(schema)"
     )
+
+
+def test_decode_json_parses_then_decodes():
+    r = E.run_sync_exit(S.decode_json(Address)('{"city": "London", "zip": "N1"}'))
+
+    assert r == ok(Address(city="London", zip_code="N1"))
+
+
+def test_decode_json_reports_malformed_text_as_an_issue():
+    r = E.run_sync_exit(S.decode_json(S.Int)("{nope"))
+
+    assert r == bad(
+        S.InvalidJson(
+            path=(),
+            reason="Expecting property name enclosed in double quotes: "
+            "line 1 column 2 (char 1)",
+        )
+    )
+
+
+def test_decode_json_rejects_non_text_input():
+    r = E.run_sync_exit(S.decode_json(S.Int)(1))  # ty: ignore[invalid-argument-type]
+
+    assert r == bad(S.TypeMismatch(path=(), expected="JSON text", actual=1))
+
+
+def test_encode_json_encodes_then_serializes():
+    r = E.run_sync_exit(S.encode_json(Address)(Address(city="London", zip_code="N1")))
+
+    assert r == ok('{"city": "London", "zip": "N1"}')
+
+
+def test_json_round_trip():
+    text = E.run_sync(S.encode_json(S.Array(S.DateFromString))((date(2026, 9, 20),)))
+
+    back = E.run_sync_exit(S.decode_json(S.Array(S.DateFromString))(text))
+
+    assert text == '["2026-09-20"]'
+    assert back == ok((date(2026, 9, 20),))

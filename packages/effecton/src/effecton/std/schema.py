@@ -8,6 +8,7 @@ every issue found, each tagged with the path where it occurred.
 """
 
 import dataclasses
+import json
 import re
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sized
@@ -206,6 +207,67 @@ def encode(schema: Any) -> Any:
 
     def run(value: Any) -> Effect[Any, ParseError]:
         return sync(lambda: resolved._encode(value, ())).flat_map(_settle)
+
+    return run
+
+
+@overload
+def decode_json[T: Struct](
+    schema: type[T],
+) -> Callable[[str], Effect[T, ParseError]]: ...
+
+
+@overload
+def decode_json[A, I](
+    schema: Schema[A, I],
+) -> Callable[[str], Effect[A, ParseError]]: ...
+
+
+def decode_json(schema: Any) -> Any:
+    """decode_json(schema)(text): parse JSON text, then decode it."""
+    resolved = _resolve(schema)
+
+    def run(text: str) -> Effect[Any, ParseError]:
+        def parse_then_decode() -> Any:
+            if not isinstance(text, str):
+                return _Issues((TypeMismatch((), "JSON text", text),))
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError as e:
+                return _Issues((InvalidJson((), str(e)),))
+            return resolved._decode(raw, ())
+
+        return sync(parse_then_decode).flat_map(_settle)
+
+    return run
+
+
+@overload
+def encode_json[T: Struct](
+    schema: type[T],
+) -> Callable[[T], Effect[str, ParseError]]: ...
+
+
+@overload
+def encode_json[A, I](
+    schema: Schema[A, I],
+) -> Callable[[A], Effect[str, ParseError]]: ...
+
+
+def encode_json(schema: Any) -> Any:
+    """encode_json(schema)(value): encode, then serialize as JSON text.
+
+    An encoded form json cannot serialize is a defect: pick schemas whose
+    wire side is JSON (every built-in is).
+    """
+    resolved = _resolve(schema)
+
+    def run(value: Any) -> Effect[Any, ParseError]:
+        def encode_then_dump() -> Any:
+            encoded = resolved._encode(value, ())
+            return encoded if isinstance(encoded, _Issues) else json.dumps(encoded)
+
+        return sync(encode_then_dump).flat_map(_settle)
 
     return run
 
