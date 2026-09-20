@@ -33,6 +33,7 @@ from effecton.std import file_system as FileSystem
 from effecton.std import http_client as HttpClient
 from effecton.std import process as Process
 from effecton.std import random as Random
+from effecton.std import schema as Schema
 from effecton.std import tracer as Tracer
 from effecton.std.clock import _now as now
 from effecton.std.clock import _sleep as sleep
@@ -96,6 +97,7 @@ __all__ = [
     "Process",
     "Random",
     "Schedule",
+    "Schema",
     "Scope",
     "Severity",
     "Succeeded",
