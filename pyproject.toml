@@ -29,6 +29,8 @@ fix = ["ut format", "ut lint-fix", "ut typecheck", "ut test"]
 [tool.ruff]
 line-length = 88
 target-version = "py314"
+# Plans and specs are prose records; their code blocks are not ours to reformat.
+extend-exclude = ["docs/superpowers"]
 
 [tool.ruff.lint]
 select = [

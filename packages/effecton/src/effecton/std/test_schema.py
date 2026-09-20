@@ -126,3 +126,107 @@ def test_parse_error_renders_one_line_per_issue_with_paths():
             "  id: expected string, got 1.5",
         ]
     )
+
+
+def test_array_decodes_to_a_tuple_and_encodes_to_a_list():
+    schema = S.Array(S.Int)
+
+    from_list = E.run_sync_exit(S.decode(schema)([1, 2]))
+    from_tuple = E.run_sync_exit(S.decode(schema)((1, 2)))
+    encoded = E.run_sync_exit(S.encode(schema)((1, 2)))
+
+    assert from_list == ok((1, 2))
+    assert from_tuple == ok((1, 2))
+    assert encoded == ok([1, 2])
+
+
+def test_array_collects_every_item_issue_with_its_index():
+    r = E.run_sync_exit(S.decode(S.Array(S.Int))([1, "x", 3, None]))
+
+    assert r == bad(
+        S.TypeMismatch(path=(1,), expected="integer", actual="x"),
+        S.TypeMismatch(path=(3,), expected="integer", actual=None),
+    )
+
+
+def test_array_rejects_non_sequences_and_strings():
+    not_a_list = E.run_sync_exit(S.decode(S.Array(S.String))("ab"))
+    encode_a_list = E.run_sync_exit(S.encode(S.Array(S.Int))([1]))  # ty: ignore[invalid-argument-type]
+
+    assert not_a_list == bad(S.TypeMismatch(path=(), expected="array", actual="ab"))
+    assert encode_a_list == bad(S.TypeMismatch(path=(), expected="tuple", actual=[1]))
+
+
+def test_record_round_trips_and_reports_key_and_value_issues():
+    schema = S.Record(S.String, S.Int)
+
+    decoded = E.run_sync_exit(S.decode(schema)({"a": 1}))
+    encoded = E.run_sync_exit(S.encode(schema)({"a": 1}))
+    broken = E.run_sync_exit(S.decode(schema)({"a": "x", 2: 3}))
+    not_a_mapping = E.run_sync_exit(S.decode(schema)([]))
+
+    assert decoded == ok({"a": 1})
+    assert encoded == ok({"a": 1})
+    assert broken == bad(
+        S.TypeMismatch(path=("a",), expected="integer", actual="x"),
+        S.TypeMismatch(path=(2,), expected="string", actual=2),
+    )
+    assert not_a_mapping == bad(S.TypeMismatch(path=(), expected="object", actual=[]))
+
+
+def test_tuple_is_fixed_length_and_positional():
+    schema = S.Tuple(S.String, S.Int)
+
+    decoded = E.run_sync_exit(S.decode(schema)(["a", 1]))
+    encoded = E.run_sync_exit(S.encode(schema)(("a", 1)))
+    wrong_length = E.run_sync_exit(S.decode(schema)(["a"]))
+    wrong_item = E.run_sync_exit(S.decode(schema)([1, "a"]))
+
+    assert decoded == ok(("a", 1))
+    assert encoded == ok(["a", 1])
+    assert wrong_length == bad(
+        S.TypeMismatch(path=(), expected="array of 2 items", actual=["a"])
+    )
+    assert wrong_item == bad(
+        S.TypeMismatch(path=(0,), expected="string", actual=1),
+        S.TypeMismatch(path=(1,), expected="integer", actual="a"),
+    )
+
+
+def test_union_takes_the_first_member_that_matches():
+    schema = S.Union(S.Int, S.String)
+
+    an_int = E.run_sync_exit(S.decode(schema)(1))
+    a_str = E.run_sync_exit(S.decode(schema)("a"))
+    encoded = E.run_sync_exit(S.encode(schema)("a"))
+
+    assert an_int == ok(1)
+    assert a_str == ok("a")
+    assert encoded == ok("a")
+
+
+def test_union_reports_every_members_issues_when_none_matches():
+    r = E.run_sync_exit(S.decode(S.Union(S.Int, S.String))(1.5))
+
+    assert r == bad(
+        S.NoUnionMember(
+            path=(),
+            actual=1.5,
+            issues=(
+                S.TypeMismatch(path=(), expected="integer", actual=1.5),
+                S.TypeMismatch(path=(), expected="string", actual=1.5),
+            ),
+        )
+    )
+
+
+def test_null_or_accepts_none_in_both_directions():
+    schema = S.NullOr(S.Int)
+
+    a_none = E.run_sync_exit(S.decode(schema)(None))
+    an_int = E.run_sync_exit(S.decode(schema)(1))
+    encoded = E.run_sync_exit(S.encode(schema)(None))
+
+    assert a_none == ok(None)
+    assert an_int == ok(1)
+    assert encoded == ok(None)

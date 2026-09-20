@@ -7,7 +7,7 @@ decode and encode return effects that fail with one ParseError listing
 every issue found, each tagged with the path where it occurred.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, final, overload
 
@@ -188,6 +188,151 @@ def Literal[T: str | int | bool | None](*values: T) -> Schema[T, T]:
     return Schema(check, check)
 
 
+def Array[A, I](item: Schema[A, I]) -> Schema[tuple[A, ...], list[I]]:
+    """A list or tuple on the wire, a tuple once decoded."""
+    inner = _resolve(item)
+
+    def decode_array(raw: object, path: IssuePath) -> Any:
+        if not isinstance(raw, list | tuple):
+            return _Issues((TypeMismatch(path, "array", raw),))
+        return _collect(
+            tuple, (inner._decode(x, (*path, i)) for i, x in enumerate(raw))
+        )
+
+    def encode_array(value: Any, path: IssuePath) -> Any:
+        if not isinstance(value, tuple):
+            return _Issues((TypeMismatch(path, "tuple", value),))
+        return _collect(
+            list, (inner._encode(x, (*path, i)) for i, x in enumerate(value))
+        )
+
+    return Schema(decode_array, encode_array)
+
+
+def Record[KA, KI, VA, VI](
+    key: Schema[KA, KI], value: Schema[VA, VI]
+) -> Schema[dict[KA, VA], dict[KI, VI]]:
+    """A mapping whose keys and values each go through their schema."""
+
+    def walk(direction: str) -> Callable[[Any, IssuePath], Any]:
+        def run(raw: Any, path: IssuePath) -> Any:
+            if not isinstance(raw, Mapping):
+                return _Issues((TypeMismatch(path, "object", raw),))
+            entries = []
+            for k, v in raw.items():
+                at = (*path, k if isinstance(k, str | int) else repr(k))
+                entries.append(getattr(key, direction)(k, at))
+                entries.append(getattr(value, direction)(v, at))
+            return _collect(
+                lambda flat: dict(zip(flat[::2], flat[1::2], strict=True)), entries
+            )
+
+        return run
+
+    return Schema(walk("_decode"), walk("_encode"))
+
+
+@overload
+def Tuple[A1, I1](m1: Schema[A1, I1], /) -> Schema[tuple[A1], list[I1]]: ...
+
+
+@overload
+def Tuple[A1, I1, A2, I2](
+    m1: Schema[A1, I1], m2: Schema[A2, I2], /
+) -> Schema[tuple[A1, A2], list[I1 | I2]]: ...
+
+
+@overload
+def Tuple[A1, I1, A2, I2, A3, I3](
+    m1: Schema[A1, I1], m2: Schema[A2, I2], m3: Schema[A3, I3], /
+) -> Schema[tuple[A1, A2, A3], list[I1 | I2 | I3]]: ...
+
+
+@overload
+def Tuple[A1, I1, A2, I2, A3, I3, A4, I4](
+    m1: Schema[A1, I1], m2: Schema[A2, I2], m3: Schema[A3, I3], m4: Schema[A4, I4], /
+) -> Schema[tuple[A1, A2, A3, A4], list[I1 | I2 | I3 | I4]]: ...
+
+
+@overload
+def Tuple(*members: Schema[Any, Any]) -> Schema[tuple[Any, ...], list[Any]]: ...
+
+
+def Tuple(*members: Schema[Any, Any]) -> Any:
+    """A fixed-length array with one schema per position."""
+    expected = f"array of {len(members)} items"
+
+    def decode_tuple(raw: object, path: IssuePath) -> Any:
+        if not isinstance(raw, list | tuple) or len(raw) != len(members):
+            return _Issues((TypeMismatch(path, expected, raw),))
+        return _collect(
+            tuple,
+            (
+                m._decode(x, (*path, i))
+                for i, (m, x) in enumerate(zip(members, raw, strict=True))
+            ),
+        )
+
+    def encode_tuple(value: Any, path: IssuePath) -> Any:
+        if not isinstance(value, tuple) or len(value) != len(members):
+            return _Issues(
+                (TypeMismatch(path, f"tuple of {len(members)} items", value),)
+            )
+        return _collect(
+            list,
+            (
+                m._encode(x, (*path, i))
+                for i, (m, x) in enumerate(zip(members, value, strict=True))
+            ),
+        )
+
+    return Schema(decode_tuple, encode_tuple)
+
+
+@overload
+def Union[A1, I1, A2, I2](
+    m1: Schema[A1, I1], m2: Schema[A2, I2], /
+) -> Schema[A1 | A2, I1 | I2]: ...
+
+
+@overload
+def Union[A1, I1, A2, I2, A3, I3](
+    m1: Schema[A1, I1], m2: Schema[A2, I2], m3: Schema[A3, I3], /
+) -> Schema[A1 | A2 | A3, I1 | I2 | I3]: ...
+
+
+@overload
+def Union[A1, I1, A2, I2, A3, I3, A4, I4](
+    m1: Schema[A1, I1], m2: Schema[A2, I2], m3: Schema[A3, I3], m4: Schema[A4, I4], /
+) -> Schema[A1 | A2 | A3 | A4, I1 | I2 | I3 | I4]: ...
+
+
+@overload
+def Union(*members: Schema[Any, Any]) -> Schema[Any, Any]: ...
+
+
+def Union(*members: Schema[Any, Any]) -> Any:
+    """The first member that succeeds wins, decoding and encoding alike."""
+
+    def walk(direction: str) -> Callable[[Any, IssuePath], Any]:
+        def run(raw: Any, path: IssuePath) -> Any:
+            collected: list[Issue] = []
+            for member in members:
+                result = getattr(member, direction)(raw, path)
+                if not isinstance(result, _Issues):
+                    return result
+                collected.extend(result.issues)
+            return _Issues((NoUnionMember(path, raw, tuple(collected)),))
+
+        return run
+
+    return Schema(walk("_decode"), walk("_encode"))
+
+
+def NullOr[A, I](schema: Schema[A, I]) -> Schema[A | None, I | None]:
+    return Union(_resolve(schema), Null)
+
+
 def _primitive[T](expected: str, accepts: Callable[[object], bool]) -> Schema[T, T]:
     # Defined before its callers: the primitives below are built at import time.
     def check(raw: Any, path: IssuePath) -> Any:
@@ -220,6 +365,18 @@ def _settle(result: Any) -> Effect[Any, ParseError]:
     if isinstance(result, _Issues):
         return fail(ParseError(issues=result.issues))
     return success(result)
+
+
+def _collect(build: Callable[[list[Any]], Any], results: Iterable[Any]) -> Any:
+    """Build from every result, or gather every issue if any result failed."""
+    values: list[Any] = []
+    issues: list[Issue] = []
+    for result in results:
+        if isinstance(result, _Issues):
+            issues.extend(result.issues)
+        else:
+            values.append(result)
+    return _Issues(tuple(issues)) if issues else build(values)
 
 
 def _at(path: IssuePath, body: str) -> str:
