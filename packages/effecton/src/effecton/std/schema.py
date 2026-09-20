@@ -129,48 +129,56 @@ class Schema[A, I]:
         self._encode = encode
 
     def check(self, *checks: Check[A]) -> Schema[A, I]:
-        """Guard decode and encode alike: every check must hold in both directions."""
+        """Guard decode and encode alike: every check must hold in both directions.
+
+        Encode runs the inner schema first, so a value of a foreign type is
+        a TypeMismatch rather than a crash inside a predicate.
+        """
+
+        def apply_checks(value: Any, path: IssuePath) -> Any:
+            """Every check against value: None if all pass, else their issues."""
+            failures = tuple(
+                RefinementFailed(path, c._message, value)
+                for c in checks
+                if not c._predicate(value)
+            )
+            return _Issues(failures) if failures else None
 
         def decode_checked(raw: object, path: IssuePath) -> Any:
             result: Any = self._decode(raw, path)
             if isinstance(result, _Issues):
                 return result
-            failed = _apply_checks(checks, result, path)
+            failed = apply_checks(result, path)
             return result if failed is None else failed
 
         def encode_checked(value: A, path: IssuePath) -> Any:
-            failed = _apply_checks(checks, value, path)
-            if failed is not None:
-                return failed
-            return self._encode(value, path)
+            result: Any = self._encode(value, path)
+            if isinstance(result, _Issues):
+                return result
+            failed = apply_checks(value, path)
+            return result if failed is None else failed
 
         return Schema(decode_checked, encode_checked)
 
 
-# T_contra is an old-style TypeVar, not a PEP 695 `[T]` parameter, because ty
+# _T_contra is an old-style TypeVar, not a PEP 695 `[T]` parameter, because ty
 # only infers declared variance from old-style TypeVars: Check must be
 # contravariant so that Check[Sized] fits a Schema[str, ...] and Check[float]
 # fits a Schema[int, ...] (see the CLAUDE.md notes on Effect's variance).
-T_contra = TypeVar("T_contra", contravariant=True)
+_T_contra = TypeVar("_T_contra", contravariant=True)
 
 
 @final
-class Check(Generic[T_contra]):  # noqa: UP046
+class Check(Generic[_T_contra]):  # noqa: UP046
     """A refinement: a predicate over the decoded value and its failure message."""
 
-    def __init__(self, predicate: Callable[[T_contra], bool], message: str) -> None:
+    def __init__(self, predicate: Callable[[_T_contra], bool], message: str) -> None:
         self._predicate = predicate
         self._message = message
 
 
-def _apply_checks(checks: tuple[Check[Any], ...], value: Any, path: IssuePath) -> Any:
-    """Run every check against value; None if all pass, else the collected issues."""
-    failures = tuple(
-        RefinementFailed(path, c._message, value)
-        for c in checks
-        if not c._predicate(value)
-    )
-    return _Issues(failures) if failures else None
+# How a combinator walks its members: _decode or _encode, chosen once.
+type _Direction = Callable[[Schema[Any, Any]], Callable[[Any, IssuePath], Any]]
 
 
 @overload
@@ -233,7 +241,10 @@ def decode_json(schema: Any) -> Any:
                 return _Issues((TypeMismatch((), "JSON text", text),))
             try:
                 raw = json.loads(text)
-            except json.JSONDecodeError as e:
+            except RecursionError:
+                # Its message counts kilobytes of stack, so say it plainly.
+                return _Issues((InvalidJson((), "nesting is too deep"),))
+            except ValueError as e:  # JSONDecodeError, and int's digit limit.
                 return _Issues((InvalidJson((), str(e)),))
             return resolved._decode(raw, ())
 
@@ -339,6 +350,21 @@ def Literal[T: str | int | bool | None](*values: T) -> Schema[T, T]:
     return Schema(check, check)
 
 
+def instance_of[T](cls: type[T]) -> Schema[T, T]:
+    """Any instance of cls, unchanged in both directions.
+
+    The guard for a transform's decoded side: pass it as `to=` so encode
+    rejects a foreign value instead of handing it to your function.
+    """
+
+    def check(raw: Any, path: IssuePath) -> Any:
+        if isinstance(raw, cls):
+            return raw
+        return _Issues((TypeMismatch(path, cls.__name__, raw),))
+
+    return Schema(check, check)
+
+
 @overload
 def Array[T: Struct](
     item: type[T],
@@ -375,22 +401,22 @@ def Record[KA, KI, VA, VI](
 ) -> Schema[dict[KA, VA], dict[KI, VI]]:
     """A mapping whose keys and values each go through their schema."""
 
-    def walk(direction: str) -> Callable[[Any, IssuePath], Any]:
+    def walk(direction: _Direction) -> Callable[[Any, IssuePath], Any]:
         def run(raw: Any, path: IssuePath) -> Any:
             if not isinstance(raw, Mapping):
                 return _Issues((TypeMismatch(path, "object", raw),))
             entries = []
             for k, v in raw.items():
                 at = (*path, k if isinstance(k, str | int) else repr(k))
-                entries.append(getattr(key, direction)(k, at))
-                entries.append(getattr(value, direction)(v, at))
+                entries.append(direction(key)(k, at))
+                entries.append(direction(value)(v, at))
             return _collect(
                 lambda flat: dict(zip(flat[::2], flat[1::2], strict=True)), entries
             )
 
         return run
 
-    return Schema(walk("_decode"), walk("_encode"))
+    return Schema(walk(lambda s: s._decode), walk(lambda s: s._encode))
 
 
 @overload
@@ -475,11 +501,11 @@ def Union(*members: Schema[Any, Any]) -> Schema[Any, Any]: ...
 def Union(*members: Schema[Any, Any]) -> Any:
     """The first member that succeeds wins, decoding and encoding alike."""
 
-    def walk(direction: str) -> Callable[[Any, IssuePath], Any]:
+    def walk(direction: _Direction) -> Callable[[Any, IssuePath], Any]:
         def run(raw: Any, path: IssuePath) -> Any:
             collected: list[Issue] = []
             for member in members:
-                result = getattr(member, direction)(raw, path)
+                result = direction(member)(raw, path)
                 if not isinstance(result, _Issues):
                     return result
                 collected.extend(result.issues)
@@ -487,7 +513,7 @@ def Union(*members: Schema[Any, Any]) -> Any:
 
         return run
 
-    return Schema(walk("_decode"), walk("_encode"))
+    return Schema(walk(lambda s: s._decode), walk(lambda s: s._encode))
 
 
 @overload
@@ -501,6 +527,7 @@ def NullOr[A, I](schema: Schema[A, I]) -> Schema[A | None, I | None]: ...
 
 
 def NullOr(schema: Any) -> Any:
+    """The schema or null, in both directions."""
     return Union(_resolve(schema), Null)
 
 
@@ -513,10 +540,19 @@ class Invalid:
 
 
 def transform[A, I, B](
-    from_: Schema[A, I], *, decode: Callable[[A], B], encode: Callable[[B], A]
+    from_: Schema[A, I],
+    *,
+    decode: Callable[[A], B],
+    encode: Callable[[B], A],
+    to: Schema[B, B] | None = None,
 ) -> Schema[B, I]:
-    """Map a schema's decoded side through a total function pair."""
-    return transform_or_fail(from_, decode=decode, encode=encode)
+    """Map a schema's decoded side through a total function pair.
+
+    Without `to`, encode hands the value straight to the function, so inside
+    a Union or NullOr the function can receive values meant for another
+    member; pass `to` to guard it, typically `S.instance_of(cls)`.
+    """
+    return transform_or_fail(from_, decode=decode, encode=encode, to=to)
 
 
 def transform_or_fail[A, I, B](
@@ -524,10 +560,12 @@ def transform_or_fail[A, I, B](
     *,
     decode: Callable[[A], B | Invalid],
     encode: Callable[[B], A | Invalid],
+    to: Schema[B, B] | None = None,
 ) -> Schema[B, I]:
     """Like transform, but either function may return Invalid(message).
 
     An exception raised by either function is a defect, not a ParseError.
+    `to` guards the decoded side in both directions, as in transform.
     """
 
     def decode_through(raw: object, path: IssuePath) -> Any:
@@ -537,9 +575,14 @@ def transform_or_fail[A, I, B](
         outer = decode(inner)
         if isinstance(outer, Invalid):
             return _Issues((TransformFailed(path, outer.message, inner),))
-        return outer
+        return outer if to is None else to._decode(outer, path)
 
     def encode_through(value: Any, path: IssuePath) -> Any:
+        if to is not None:
+            guarded: Any = to._encode(value, path)
+            if isinstance(guarded, _Issues):
+                return guarded
+            value = guarded
         inner = encode(value)
         if isinstance(inner, Invalid):
             return _Issues((TransformFailed(path, inner.message, value),))
@@ -554,14 +597,17 @@ def filter[A](predicate: Callable[[A], bool], *, message: str) -> Check[A]:
 
 
 def min_length(n: int) -> Check[Sized]:
+    """A length of at least n."""
     return filter(lambda v: len(v) >= n, message=f"expected a length of at least {n}")
 
 
 def max_length(n: int) -> Check[Sized]:
+    """A length of at most n."""
     return filter(lambda v: len(v) <= n, message=f"expected a length of at most {n}")
 
 
 def pattern(regex: str) -> Check[str]:
+    """A string the regular expression finds a match in."""
     compiled = re.compile(regex)
     return filter(
         lambda v: compiled.search(v) is not None,
@@ -570,18 +616,22 @@ def pattern(regex: str) -> Check[str]:
 
 
 def greater_than(n: float) -> Check[float]:
+    """A number strictly greater than n."""
     return filter(lambda v: v > n, message=f"expected a number greater than {n}")
 
 
 def greater_than_or_equal_to(n: float) -> Check[float]:
+    """A number of at least n."""
     return filter(lambda v: v >= n, message=f"expected a number at least {n}")
 
 
 def less_than(n: float) -> Check[float]:
+    """A number strictly less than n."""
     return filter(lambda v: v < n, message=f"expected a number less than {n}")
 
 
 def less_than_or_equal_to(n: float) -> Check[float]:
+    """A number of at most n."""
     return filter(lambda v: v <= n, message=f"expected a number at most {n}")
 
 
@@ -618,22 +668,32 @@ def _parser[T](parse: Callable[[str], T], message: str) -> Callable[[str], T | I
 
 
 IntFromString: Schema[int, str] = transform_or_fail(
-    String, decode=_parser(int, "expected an integer string"), encode=str
+    String, decode=_parser(int, "expected an integer string"), encode=str, to=Int
 )
 FloatFromString: Schema[float, str] = transform_or_fail(
-    String, decode=_parser(float, "expected a number string"), encode=str
+    String, decode=_parser(float, "expected a number string"), encode=str, to=Float
 )
 DateTimeFromString: Schema[datetime, str] = transform_or_fail(
     String,
     decode=_parser(datetime.fromisoformat, "expected an ISO 8601 datetime"),
     encode=datetime.isoformat,
+    to=instance_of(datetime),
 )
+# A datetime is a date, and encoding one would silently drop its time.
 DateFromString: Schema[date, str] = transform_or_fail(
     String,
     decode=_parser(date.fromisoformat, "expected an ISO 8601 date"),
     encode=date.isoformat,
+    to=instance_of(date).check(
+        filter(
+            lambda d: not isinstance(d, datetime),
+            message="expected a date without a time",
+        )
+    ),
 )
-PathFromString: Schema[Path, str] = transform(String, decode=Path, encode=str)
+PathFromString: Schema[Path, str] = transform(
+    String, decode=Path, encode=str, to=instance_of(Path)
+)
 
 
 def _resolve(schema: Any) -> Schema[Any, Any]:
@@ -656,10 +716,22 @@ class _FieldSpec:
 def _struct_schema(cls: type[Any]) -> Schema[Any, dict[str, object]]:
     hints = typing.get_type_hints(cls)
     plan: list[tuple[str, str, Schema[Any, Any], Any]] = []
+    owner_of: dict[str, str] = {}
     for f in dataclasses.fields(cls):
         spec: _FieldSpec = f.metadata.get(_FIELD, _FieldSpec(schema=None, key=None))
-        schema = spec.schema or _infer(hints[f.name], f"{cls.__name__}.{f.name}")
-        plan.append((f.name, spec.key or f.name, schema, f.default))
+        schema = (
+            _infer(hints[f.name], f"{cls.__name__}.{f.name}")
+            if spec.schema is None
+            else spec.schema
+        )
+        key = f.name if spec.key is None else spec.key
+        if key in owner_of:
+            raise TypeError(
+                f"{cls.__name__}: fields {owner_of[key]!r} and {f.name!r} "
+                f"share the wire key {key!r}"
+            )
+        owner_of[key] = f.name
+        plan.append((f.name, key, schema, f.default))
 
     def decode_struct(raw: object, path: IssuePath) -> Any:
         if not isinstance(raw, Mapping):
@@ -698,7 +770,11 @@ def _infer(annotation: Any, where: str) -> Schema[Any, Any]:
     }
     if annotation in direct:
         return direct[annotation]
-    if isinstance(annotation, type) and issubclass(annotation, Struct):
+    if (
+        isinstance(annotation, type)
+        and issubclass(annotation, Struct)
+        and annotation is not Struct
+    ):
         return annotation.__schema__
     origin, args = typing.get_origin(annotation), typing.get_args(annotation)
     if origin in (UnionType, typing.Union):

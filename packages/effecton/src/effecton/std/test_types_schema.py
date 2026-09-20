@@ -67,6 +67,10 @@ def _collections_compose_both_sides() -> None:
 def _transforms_and_refinements_keep_types() -> None:
     length = S.transform(S.String, decode=len, encode=lambda n: "x" * n)
     assert_type(length, S.Schema[int, str])
+    guarded = S.transform(S.String, decode=len, encode=lambda n: "x" * n, to=S.Int)
+    assert_type(guarded, S.Schema[int, str])
+    a_moment = S.instance_of(datetime)
+    assert_type(a_moment, S.Schema[datetime, datetime])
 
     def halve(n: int) -> int | S.Invalid:
         return n // 2 if n % 2 == 0 else S.Invalid("odd")
@@ -143,6 +147,9 @@ def _schema_negative() -> None:
     S.String.check(S.greater_than(1))  # ty: ignore[invalid-argument-type]
     S.Int.check(S.pattern("a"))  # ty: ignore[invalid-argument-type]
     S.NullOr(S.String).check(S.min_length(1))  # ty: ignore[invalid-argument-type]
+
+    # A transform's `to` guard must match its decoded type.
+    S.transform(S.String, decode=len, encode=lambda n: "x" * n, to=S.String)  # ty: ignore[invalid-argument-type]
 
     # Literal members are str, int, bool or None.
     S.Literal(1.5)  # ty: ignore[invalid-argument-type]

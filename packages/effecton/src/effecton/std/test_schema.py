@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 
@@ -20,6 +20,14 @@ def bad(*issues: S.Issue):
 class Address(S.Struct):
     city: str
     zip_code: str = S.field(key="zip")
+
+
+class Base(S.Struct):
+    id: str
+
+
+class Child(Base):
+    count: int
 
 
 class User(S.Struct):
@@ -105,14 +113,11 @@ def test_encode_checks_the_runtime_type_too():
 
 def test_decode_is_lazy_until_run():
     calls: list[object] = []
+    spy: S.Schema[object, object] = S.Schema(
+        lambda raw, path: calls.append(raw) or raw, lambda value, path: value
+    )
 
-    def spy(raw: object, path: S.IssuePath) -> object:
-        calls.append(raw)
-        return raw
-
-    schema = S.Schema(spy, spy)
-
-    effect = S.decode(schema)("x")
+    effect = S.decode(spy)("x")
 
     assert calls == []
     assert E.run_sync_exit(effect) == ok("x")
@@ -196,6 +201,16 @@ def test_record_round_trips_and_reports_key_and_value_issues():
     assert not_a_mapping == bad(S.TypeMismatch(path=(), expected="object", actual=[]))
 
 
+def test_record_keys_go_through_their_own_schema():
+    schema = S.Record(S.IntFromString, S.Int)
+
+    decoded = E.run_sync_exit(S.decode(schema)({"1": 2}))
+    encoded = E.run_sync_exit(S.encode(schema)({1: 2}))
+
+    assert decoded == ok({1: 2})
+    assert encoded == ok({"1": 2})
+
+
 def test_tuple_is_fixed_length_and_positional():
     schema = S.Tuple(S.String, S.Int)
 
@@ -254,6 +269,19 @@ def test_null_or_accepts_none_in_both_directions():
     assert encoded == ok(None)
 
 
+def test_instance_of_passes_instances_in_both_directions():
+    schema = S.instance_of(datetime)
+    moment = datetime(2026, 9, 20, 10, 30)
+
+    decoded = E.run_sync_exit(S.decode(schema)(moment))
+    encoded = E.run_sync_exit(S.encode(schema)(moment))
+    rejected = E.run_sync_exit(S.decode(schema)("x"))
+
+    assert decoded == ok(moment)
+    assert encoded == ok(moment)
+    assert rejected == bad(S.TypeMismatch(path=(), expected="datetime", actual="x"))
+
+
 def test_transform_maps_both_directions():
     schema = S.transform(S.String, decode=len, encode=lambda n: "x" * n)
 
@@ -292,6 +320,87 @@ def test_an_exception_inside_a_transform_is_a_defect():
     r = E.run_sync_exit(S.decode(schema)("x"))
 
     assert r == E.Failure(cause=E.Die(defect=boom))
+
+
+def test_a_guarded_transform_never_calls_its_function_on_a_foreign_value():
+    seen: list[object] = []
+
+    def remember(n: int) -> int | S.Invalid:
+        seen.append(n)
+        return n
+
+    schema = S.transform_or_fail(S.Int, decode=remember, encode=remember, to=S.Int)
+
+    r = E.run_sync_exit(S.encode(schema)("x"))  # ty: ignore[invalid-argument-type]
+
+    assert r == bad(S.TypeMismatch(path=(), expected="integer", actual="x"))
+    assert seen == []
+
+
+def test_null_or_encodes_none_without_entering_its_member():
+    an_int = E.run_sync_exit(S.encode(S.NullOr(S.IntFromString))(None))
+    a_path = E.run_sync_exit(S.encode(S.NullOr(S.PathFromString))(None))
+    a_moment = E.run_sync_exit(S.encode(S.NullOr(S.DateTimeFromString))(None))
+    checked_text = E.run_sync_exit(
+        S.encode(S.NullOr(S.String.check(S.min_length(1))))(None)
+    )
+    checked_int = E.run_sync_exit(
+        S.encode(S.NullOr(S.Int.check(S.greater_than(0))))(None)
+    )
+
+    assert an_int == ok(None)
+    assert a_path == ok(None)
+    assert a_moment == ok(None)
+    assert checked_text == ok(None)
+    assert checked_int == ok(None)
+
+
+def test_union_encode_passes_a_value_its_first_member_cannot_take():
+    r = E.run_sync_exit(S.encode(S.Union(S.DateFromString, S.String))("abc"))
+
+    assert r == ok("abc")
+
+
+def test_builtin_transforms_reject_wrongly_typed_values_on_encode():
+    from_bool = E.run_sync_exit(S.encode(S.IntFromString)(True))
+    from_text = E.run_sync_exit(S.encode(S.IntFromString)("x"))  # ty: ignore[invalid-argument-type]
+    a_datetime = E.run_sync_exit(S.encode(S.DateFromString)(datetime(2026, 9, 20, 10)))
+
+    assert from_bool == bad(S.TypeMismatch(path=(), expected="integer", actual=True))
+    assert from_text == bad(S.TypeMismatch(path=(), expected="integer", actual="x"))
+    assert a_datetime == bad(
+        S.RefinementFailed(
+            path=(),
+            message="expected a date without a time",
+            actual=datetime(2026, 9, 20, 10),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema", "value"),
+    [
+        (S.IntFromString, 42),
+        (S.FloatFromString, 1.5),
+        (S.DateTimeFromString, datetime(2026, 9, 20, 10, 30)),
+        (S.DateFromString, date(2026, 9, 20)),
+        (S.PathFromString, E.Path("/a/b")),
+    ],
+)
+def test_every_builtin_transform_round_trips_bare_and_inside_null_or(
+    schema: S.Schema[Any, Any], value: Any
+):
+    nullable = S.NullOr(schema)
+
+    bare = E.run_sync_exit(S.decode(schema)(E.run_sync(S.encode(schema)(value))))
+    through_null = E.run_sync_exit(
+        S.decode(nullable)(E.run_sync(S.encode(nullable)(value)))
+    )
+    a_none = E.run_sync_exit(S.encode(nullable)(None))
+
+    assert bare == ok(value)
+    assert through_null == ok(value)
+    assert a_none == ok(None)
 
 
 def test_builtin_string_transforms_round_trip():
@@ -540,6 +649,69 @@ def test_an_annotation_with_no_inferable_schema_fails_at_class_definition():
     )
 
 
+def test_two_fields_sharing_a_wire_key_fail_at_class_definition():
+    with pytest.raises(TypeError) as raised:
+
+        class Point(S.Struct):
+            a: int = S.field(key="x")
+            b: int = S.field(key="x")
+
+    assert str(raised.value) == "Point: fields 'a' and 'b' share the wire key 'x'"
+
+
+def test_a_renamed_field_colliding_with_another_field_name_fails():
+    with pytest.raises(TypeError) as raised:
+
+        class Pair(S.Struct):
+            a: int = S.field(key="b")
+            b: int
+
+    assert str(raised.value) == "Pair: fields 'a' and 'b' share the wire key 'b'"
+
+
+def test_an_empty_wire_key_is_honored():
+    class Odd(S.Struct):
+        value: int = S.field(key="")
+
+    decoded = E.run_sync_exit(S.decode(Odd)({"": 1}))
+    encoded = E.run_sync_exit(S.encode(Odd)(Odd(value=1)))
+
+    assert decoded == ok(Odd(value=1))
+    assert encoded == ok({"": 1})
+
+
+def test_an_annotation_of_struct_itself_fails_at_class_definition():
+    with pytest.raises(TypeError) as raised:
+
+        class Wrapper(S.Struct):
+            inner: S.Struct
+
+    assert str(raised.value) == (
+        "Wrapper.inner: no schema can be inferred for "
+        "<class 'effecton.std.schema.Struct'>; pass one with S.field(schema)"
+    )
+
+
+def test_a_struct_subclass_keeps_the_inherited_fields():
+    decoded = E.run_sync_exit(S.decode(Child)({"id": "a", "count": 1}))
+    encoded = E.run_sync_exit(S.encode(Child)(Child(id="a", count=1)))
+
+    assert decoded == ok(Child(id="a", count=1))
+    assert encoded == ok({"id": "a", "count": 1})
+
+
+def test_issue_paths_use_wire_keys_to_decode_and_field_names_to_encode():
+    decoded = E.run_sync_exit(S.decode(Address)({"city": "London", "zip": 1}))
+    encoded = E.run_sync_exit(
+        S.encode(Address)(Address(city="London", zip_code=1))  # ty: ignore[invalid-argument-type]
+    )
+
+    assert decoded == bad(S.TypeMismatch(path=("zip",), expected="string", actual=1))
+    assert encoded == bad(
+        S.TypeMismatch(path=("zip_code",), expected="string", actual=1)
+    )
+
+
 def test_decode_json_parses_then_decodes():
     r = E.run_sync_exit(S.decode_json(Address)('{"city": "London", "zip": "N1"}'))
 
@@ -558,6 +730,25 @@ def test_decode_json_reports_malformed_text_as_an_issue():
     )
 
 
+def test_decode_json_reports_a_number_python_refuses_to_build_as_an_issue():
+    r = E.run_sync_exit(S.decode_json(S.Int)("1" + "0" * 5000))
+
+    assert r == bad(
+        S.InvalidJson(
+            path=(),
+            reason="Exceeds the limit (4300 digits) for integer string conversion: "
+            "value has 5001 digits; use sys.set_int_max_str_digits() to "
+            "increase the limit",
+        )
+    )
+
+
+def test_decode_json_reports_deeply_nested_text_as_an_issue():
+    r = E.run_sync_exit(S.decode_json(S.Unknown)("[" * 100000))
+
+    assert r == bad(S.InvalidJson(path=(), reason="nesting is too deep"))
+
+
 def test_decode_json_rejects_non_text_input():
     r = E.run_sync_exit(S.decode_json(S.Int)(1))  # ty: ignore[invalid-argument-type]
 
@@ -568,6 +759,16 @@ def test_encode_json_encodes_then_serializes():
     r = E.run_sync_exit(S.encode_json(Address)(Address(city="London", zip_code="N1")))
 
     assert r == ok('{"city": "London", "zip": "N1"}')
+
+
+def test_encode_json_of_a_form_json_cannot_serialize_is_a_defect():
+    r = E.run_sync_exit(S.encode_json(S.instance_of(datetime))(datetime(2026, 9, 20)))
+
+    match r:
+        case E.Failure(cause=E.Die(defect=defect)):
+            assert isinstance(defect, TypeError)
+        case _:
+            pytest.fail(f"expected a defect, got {r!r}")
 
 
 def test_json_round_trip():
