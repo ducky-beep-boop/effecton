@@ -52,7 +52,7 @@ Each is overloaded to accept a `Struct` subclass directly: `S.decode(User)(raw)`
 
 **Collections** — `S.Array(item)` decodes a `list` or `tuple` to a `tuple` and encodes to a `list`; `S.Record(key, value)` decodes a mapping to a `dict`; `S.Tuple(*items)` is fixed-length; `S.Union(*members)` tries members in order on decode, and on encode picks the first member whose encode succeeds; `S.NullOr(schema)` is `Union(schema, Null)`.
 
-**Transforms** — `S.transform(from_, to, decode=f, encode=g)` for total conversions, and `S.transform_or_fail(from_, to, decode=f, encode=g)` whose functions return the value or an `S.TransformFailed` message. Built-ins: `S.IntFromString`, `S.FloatFromString`, `S.DateTimeFromString` (ISO 8601), `S.DateFromString`, `S.PathFromString` (`E.Path`). An unexpected exception inside a user function stays a defect.
+**Transforms** — `S.transform(from_, decode=f, encode=g)` for total conversions, and `S.transform_or_fail(from_, decode=f, encode=g)` whose functions return the value or `S.Invalid(message)`, reported as a `TransformFailed` issue. There is no `to` schema: the decoded type is inferred from `f`, and further constraints attach with `.pipe(...)`. Built-ins: `S.IntFromString`, `S.FloatFromString`, `S.DateTimeFromString` (ISO 8601), `S.DateFromString`, `S.PathFromString` (`E.Path`). An unexpected exception inside a user function stays a defect.
 
 **Refinements** — `S.filter(predicate, message=...)` plus sugar `S.min_length`, `S.max_length`, `S.pattern`, `S.greater_than`, `S.greater_than_or_equal_to`, `S.less_than`, `S.less_than_or_equal_to`, applied through `schema.pipe(...)`. Refinements run in both directions, as in Effect-TS: encoding an invalid value fails.
 
@@ -67,9 +67,9 @@ class User(S.Struct):
 
 - `Struct` is marked `@dataclass_transform(frozen_default=True, kw_only_default=True, field_specifiers=(field,))` and turns each subclass into a frozen, keyword-only dataclass in `__init_subclass__`.
 - The annotation is always the decoded type. A schema is inferred for `str`, `int`, `float`, `bool`, `None`, `T | None`, `tuple[T, ...]`, `Mapping[str, T]`, `Literal[...]`, and nested `Struct` subclasses. Any other annotation without `S.field(schema)` raises `TypeError` at class definition.
-- `S.field(schema=None, *, key=None, default=MISSING)`: `key` renames the wire key; a default makes the key optional on decode. Encoding always emits every field.
+- `S.field(schema=None, *, key=None, default=MISSING)`: `key` renames the wire key; a default makes the key optional on decode. Encoding always emits every field. Mutable defaults (`dict`, `list`) are rejected, as in dataclasses.
 - Unknown input keys are ignored on decode.
-- `S.struct_schema(User)` exposes the underlying `Schema[User, dict[str, object]]` for use inside combinators (`S.Array(S.struct_schema(User))`); combinators also accept a `Struct` class directly where ty's overloads allow.
+- `S.struct_schema(User)` exposes the underlying `Schema[User, dict[str, object]]` for use inside combinators (`S.Array(S.struct_schema(User))`); `S.Array` and `S.NullOr` also accept a `Struct` class directly, as do the four entry points.
 
 ## Errors
 
@@ -92,4 +92,4 @@ Issues are plain `@final` frozen dataclasses (data, not errors), each with `path
 
 ## Risks
 
-ty's support for `dataclass_transform` on a base class with `__init_subclass__`, and for `type[T]` overloads next to `Schema[A, I]` overloads, is unverified. The implementation plan starts with a typing spike. Fallbacks, in order: a `@S.struct` class decorator instead of the base class; requiring `S.struct_schema(User)` instead of overloading entry points on the class.
+A typing spike against ty 0.0.75+ verified the design: `dataclass_transform` on a base class with `__init_subclass__`, `type[T]` overloads next to `Schema[A, I]` overloads, literal-preserving `S.Literal`, refinements through `pipe`, and `field` overloads all infer and reject as intended. One quirk remains: `Schema` is invariant, so an expected type must not flow into a `S.Union(...)` call — type pins bind the schema to a local before `assert_type`.
