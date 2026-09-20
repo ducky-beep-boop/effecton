@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sized
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, final, overload
+from typing import Any, Generic, TypeVar, final, overload
 
 from effecton.effect import Effect, EffectonError, fail, success, sync
 from effecton.std.path import Path
@@ -124,39 +124,49 @@ class Schema[A, I]:
         self._decode = decode
         self._encode = encode
 
-    @overload
-    def pipe[B](self, f1: Callable[[Schema[A, I]], B], /) -> B: ...
+    def check(self, *checks: Check[A]) -> Schema[A, I]:
+        """Guard decode and encode alike: every check must hold in both directions."""
 
-    @overload
-    def pipe[B, C](
-        self, f1: Callable[[Schema[A, I]], B], f2: Callable[[B], C], /
-    ) -> C: ...
+        def decode_checked(raw: object, path: IssuePath) -> Any:
+            result: Any = self._decode(raw, path)
+            if isinstance(result, _Issues):
+                return result
+            failed = _apply_checks(checks, result, path)
+            return result if failed is None else failed
 
-    @overload
-    def pipe[B, C, D](
-        self,
-        f1: Callable[[Schema[A, I]], B],
-        f2: Callable[[B], C],
-        f3: Callable[[C], D],
-        /,
-    ) -> D: ...
+        def encode_checked(value: A, path: IssuePath) -> Any:
+            failed = _apply_checks(checks, value, path)
+            if failed is not None:
+                return failed
+            return self._encode(value, path)
 
-    @overload
-    def pipe[B, C, D, F](
-        self,
-        f1: Callable[[Schema[A, I]], B],
-        f2: Callable[[B], C],
-        f3: Callable[[C], D],
-        f4: Callable[[D], F],
-        /,
-    ) -> F: ...
+        return Schema(decode_checked, encode_checked)
 
-    def pipe(self, *fs: Callable[[Any], Any]) -> Any:
-        """Thread this schema through refinements, left to right."""
-        result: Any = self
-        for f in fs:
-            result = f(result)
-        return result
+
+# T_contra is an old-style TypeVar, not a PEP 695 `[T]` parameter, because ty
+# only infers declared variance from old-style TypeVars: Check must be
+# contravariant so that Check[Sized] fits a Schema[str, ...] and Check[float]
+# fits a Schema[int, ...] (see the CLAUDE.md notes on Effect's variance).
+T_contra = TypeVar("T_contra", contravariant=True)
+
+
+@final
+class Check(Generic[T_contra]):  # noqa: UP046
+    """A refinement: a predicate over the decoded value and its failure message."""
+
+    def __init__(self, predicate: Callable[[T_contra], bool], message: str) -> None:
+        self._predicate = predicate
+        self._message = message
+
+
+def _apply_checks(checks: tuple[Check[Any], ...], value: Any, path: IssuePath) -> Any:
+    """Run every check against value; None if all pass, else the collected issues."""
+    failures = tuple(
+        RefinementFailed(path, c._message, value)
+        for c in checks
+        if not c._predicate(value)
+    )
+    return _Issues(failures) if failures else None
 
 
 def decode[A, I](schema: Schema[A, I]) -> Callable[[object], Effect[A, ParseError]]:
@@ -380,37 +390,20 @@ def transform_or_fail[A, I, B](
     return Schema(decode_through, encode_through)
 
 
-def filter[A, I](
-    predicate: Callable[[A], bool], *, message: str
-) -> Callable[[Schema[A, I]], Schema[A, I]]:
-    """A refinement for pipe(): the predicate guards decode and encode alike."""
-
-    def refine(schema: Schema[A, I]) -> Schema[A, I]:
-        def decode_checked(raw: object, path: IssuePath) -> Any:
-            result: Any = schema._decode(raw, path)
-            if isinstance(result, _Issues) or predicate(result):
-                return result
-            return _Issues((RefinementFailed(path, message, result),))
-
-        def encode_checked(value: Any, path: IssuePath) -> Any:
-            if not predicate(value):
-                return _Issues((RefinementFailed(path, message, value),))
-            return schema._encode(value, path)
-
-        return Schema(decode_checked, encode_checked)
-
-    return refine
+def filter[A](predicate: Callable[[A], bool], *, message: str) -> Check[A]:
+    """A refinement for Schema.check(): a bare predicate plus its failure message."""
+    return Check(predicate, message)
 
 
-def min_length[A: Sized, I](n: int) -> Callable[[Schema[A, I]], Schema[A, I]]:
+def min_length(n: int) -> Check[Sized]:
     return filter(lambda v: len(v) >= n, message=f"expected a length of at least {n}")
 
 
-def max_length[A: Sized, I](n: int) -> Callable[[Schema[A, I]], Schema[A, I]]:
+def max_length(n: int) -> Check[Sized]:
     return filter(lambda v: len(v) <= n, message=f"expected a length of at most {n}")
 
 
-def pattern[I](regex: str) -> Callable[[Schema[str, I]], Schema[str, I]]:
+def pattern(regex: str) -> Check[str]:
     compiled = re.compile(regex)
     return filter(
         lambda v: compiled.search(v) is not None,
@@ -418,23 +411,19 @@ def pattern[I](regex: str) -> Callable[[Schema[str, I]], Schema[str, I]]:
     )
 
 
-def greater_than[A: float, I](n: float) -> Callable[[Schema[A, I]], Schema[A, I]]:
+def greater_than(n: float) -> Check[float]:
     return filter(lambda v: v > n, message=f"expected a number greater than {n}")
 
 
-def greater_than_or_equal_to[A: float, I](
-    n: float,
-) -> Callable[[Schema[A, I]], Schema[A, I]]:
+def greater_than_or_equal_to(n: float) -> Check[float]:
     return filter(lambda v: v >= n, message=f"expected a number at least {n}")
 
 
-def less_than[A: float, I](n: float) -> Callable[[Schema[A, I]], Schema[A, I]]:
+def less_than(n: float) -> Check[float]:
     return filter(lambda v: v < n, message=f"expected a number less than {n}")
 
 
-def less_than_or_equal_to[A: float, I](
-    n: float,
-) -> Callable[[Schema[A, I]], Schema[A, I]]:
+def less_than_or_equal_to(n: float) -> Check[float]:
     return filter(lambda v: v <= n, message=f"expected a number at most {n}")
 
 

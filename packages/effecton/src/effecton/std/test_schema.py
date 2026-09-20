@@ -323,7 +323,9 @@ def test_builtin_string_transforms_reject_malformed_text():
 
 
 def test_filter_guards_decode_and_encode():
-    even = S.Int.pipe(S.filter(lambda n: n % 2 == 0, message="expected an even number"))
+    even = S.Int.check(
+        S.filter(lambda n: n % 2 == 0, message="expected an even number")
+    )
 
     passed = E.run_sync_exit(S.decode(even)(2))
     decode_rejected = E.run_sync_exit(S.decode(even)(3))
@@ -340,10 +342,25 @@ def test_filter_guards_decode_and_encode():
     assert wrong_type == bad(S.TypeMismatch(path=(), expected="integer", actual="x"))
 
 
+def test_check_reports_every_failing_check():
+    schema = S.String.check(S.min_length(3), S.pattern(r"^[a-z]+$"))
+
+    r = E.run_sync_exit(S.decode(schema)("A"))
+
+    assert r == bad(
+        S.RefinementFailed(
+            path=(), message="expected a length of at least 3", actual="A"
+        ),
+        S.RefinementFailed(
+            path=(), message="expected a string matching ^[a-z]+$", actual="A"
+        ),
+    )
+
+
 def test_refinement_sugar():
-    name = S.String.pipe(S.min_length(2), S.max_length(3), S.pattern(r"^[a-z]+$"))
-    percent = S.Int.pipe(S.greater_than_or_equal_to(0), S.less_than_or_equal_to(100))
-    open_unit = S.Float.pipe(S.greater_than(0), S.less_than(1))
+    name = S.String.check(S.min_length(2), S.max_length(3), S.pattern(r"^[a-z]+$"))
+    percent = S.Int.check(S.greater_than_or_equal_to(0), S.less_than_or_equal_to(100))
+    open_unit = S.Float.check(S.greater_than(0), S.less_than(1))
 
     assert E.run_sync_exit(S.decode(name)("ab")) == ok("ab")
     assert E.run_sync_exit(S.decode(name)("a")) == bad(
@@ -368,11 +385,11 @@ def test_refinement_sugar():
     assert E.run_sync_exit(S.decode(percent)(-1)) == bad(
         S.RefinementFailed(path=(), message="expected a number at least 0", actual=-1)
     )
-    assert E.run_sync_exit(S.decode(open_unit)(0)) == bad(  # ty: ignore[invalid-argument-type]
+    assert E.run_sync_exit(S.decode(open_unit)(0)) == bad(
         S.RefinementFailed(
             path=(), message="expected a number greater than 0", actual=0
         )
     )
-    assert E.run_sync_exit(S.decode(open_unit)(1)) == bad(  # ty: ignore[invalid-argument-type]
+    assert E.run_sync_exit(S.decode(open_unit)(1)) == bad(
         S.RefinementFailed(path=(), message="expected a number less than 1", actual=1)
     )
