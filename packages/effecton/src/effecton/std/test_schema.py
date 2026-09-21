@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any, Literal
@@ -730,9 +731,23 @@ def test_decode_json_reports_a_number_python_refuses_to_build_as_an_issue():
 
 
 def test_decode_json_reports_deeply_nested_text_as_an_issue():
-    r = E.run_sync_exit(S.decode_json(S.Unknown)("[" * 100000))
+    # The C JSON scanner overflows only once it exhausts the C stack, whose
+    # size follows `ulimit -s` on the main thread (unlimited on some CI hosts),
+    # so decode on a thread with a fixed 1 MiB stack instead.
+    exits: list[E.Exit[object, S.ParseError]] = []
 
-    assert r == bad(S.InvalidJson(path=(), reason="nesting is too deep"))
+    def decode():
+        exits.append(E.run_sync_exit(S.decode_json(S.Unknown)("[" * 100000)))
+
+    previous = threading.stack_size(1 << 20)
+    try:
+        thread = threading.Thread(target=decode)
+        thread.start()
+    finally:
+        threading.stack_size(previous)
+    thread.join()
+
+    assert exits == [bad(S.InvalidJson(path=(), reason="nesting is too deep"))]
 
 
 def test_decode_json_rejects_non_text_input():
