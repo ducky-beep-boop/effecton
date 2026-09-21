@@ -80,23 +80,32 @@ def _transforms_and_refinements_keep_types() -> None:
 
     halved = S.transform_or_fail(S.Int, decode=halve, encode=double)
     assert_type(halved, S.Schema[int, int])
-    refined = S.String.check(S.min_length(1), S.pattern("^a"))
+    refined = S.String.check(
+        S.filter(lambda s: len(s) >= 1, message="m"), S.pattern("^a")
+    )
     assert_type(refined, S.Schema[str, str])
-    positive = S.IntFromString.check(S.greater_than(0))
+    positive = S.IntFromString.check(S.filter(lambda n: n > 0, message="m"))
     assert_type(positive, S.Schema[int, str])
     even = S.Int.check(S.filter(lambda n: n % 2 == 0, message="even"))
     assert_type(even, S.Schema[int, int])
 
-    ranged = S.Float.check(S.greater_than(0), S.less_than(1))
+    ranged = S.Float.check(
+        S.filter(lambda n: n > 0, message="m"), S.filter(lambda n: n < 1, message="m")
+    )
     assert_type(ranged, S.Schema[float, float])
     maybe_long = S.NullOr(S.String).check(
         S.filter(lambda v: v is None or len(v) > 1, message="m")
     )
     assert_type(maybe_long, S.Schema[str | None, str | None])
-    min_len_check = S.min_length(1)
-    assert_type(min_len_check, S.Check[Sized])
-    greater_than_check = S.greater_than(0)
-    assert_type(greater_than_check, S.Check[float])
+    pattern_check = S.pattern("^a")
+    assert_type(pattern_check, S.Check[str])
+    # Check is contravariant: a check over a supertype fits a narrower schema.
+    sized: S.Check[Sized] = S.filter(lambda v: len(v) > 0, message="m")
+    number: S.Check[float] = S.filter(lambda n: n > 0, message="m")
+    non_empty = S.String.check(sized)
+    assert_type(non_empty, S.Schema[str, str])
+    positive_int = S.Int.check(number)
+    assert_type(positive_int, S.Schema[int, int])
 
 
 def _structs_are_typed_dataclasses_and_schemas() -> None:
@@ -143,10 +152,12 @@ def _schema_negative() -> None:
     _must_be_int: int = S.field(S.String)  # ty: ignore[invalid-assignment]
 
     # Refinements only fit schemas of the right decoded type.
-    S.Int.check(S.min_length(1))  # ty: ignore[invalid-argument-type]
-    S.String.check(S.greater_than(1))  # ty: ignore[invalid-argument-type]
+    sized: S.Check[Sized] = S.filter(lambda v: len(v) > 0, message="m")
+    number: S.Check[float] = S.filter(lambda n: n > 0, message="m")
+    S.Int.check(sized)  # ty: ignore[invalid-argument-type]
+    S.String.check(number)  # ty: ignore[invalid-argument-type]
     S.Int.check(S.pattern("a"))  # ty: ignore[invalid-argument-type]
-    S.NullOr(S.String).check(S.min_length(1))  # ty: ignore[invalid-argument-type]
+    S.NullOr(S.String).check(sized)  # ty: ignore[invalid-argument-type]
 
     # A transform's `to` guard must match its decoded type.
     S.transform(S.String, decode=len, encode=lambda n: "x" * n, to=S.String)  # ty: ignore[invalid-argument-type]

@@ -32,7 +32,9 @@ class Child(Base):
 
 class User(S.Struct):
     name: str
-    age: int = S.field(S.Int.check(S.greater_than_or_equal_to(0)))
+    age: int = S.field(
+        S.Int.check(S.filter(lambda n: n >= 0, message="expected a number at least 0"))
+    )
     created: datetime = S.field(S.DateTimeFromString, key="createdAt")
     address: Address
     role: Literal["admin", "member"] = "member"
@@ -342,10 +344,14 @@ def test_null_or_encodes_none_without_entering_its_member():
     a_path = E.run_sync_exit(S.encode(S.NullOr(S.PathFromString))(None))
     a_moment = E.run_sync_exit(S.encode(S.NullOr(S.DateTimeFromString))(None))
     checked_text = E.run_sync_exit(
-        S.encode(S.NullOr(S.String.check(S.min_length(1))))(None)
+        S.encode(
+            S.NullOr(S.String.check(S.filter(lambda s: len(s) >= 1, message="empty")))
+        )(None)
     )
     checked_int = E.run_sync_exit(
-        S.encode(S.NullOr(S.Int.check(S.greater_than(0))))(None)
+        S.encode(
+            S.NullOr(S.Int.check(S.filter(lambda n: n > 0, message="not positive")))
+        )(None)
     )
 
     assert an_int == ok(None)
@@ -472,7 +478,10 @@ def test_filter_guards_decode_and_encode():
 
 
 def test_check_reports_every_failing_check():
-    schema = S.String.check(S.min_length(3), S.pattern(r"^[a-z]+$"))
+    schema = S.String.check(
+        S.filter(lambda s: len(s) >= 3, message="expected a length of at least 3"),
+        S.pattern(r"^[a-z]+$"),
+    )
 
     r = E.run_sync_exit(S.decode(schema)("A"))
 
@@ -486,42 +495,19 @@ def test_check_reports_every_failing_check():
     )
 
 
-def test_refinement_sugar():
-    name = S.String.check(S.min_length(2), S.max_length(3), S.pattern(r"^[a-z]+$"))
-    percent = S.Int.check(S.greater_than_or_equal_to(0), S.less_than_or_equal_to(100))
-    open_unit = S.Float.check(S.greater_than(0), S.less_than(1))
+def test_pattern_finds_a_match_in_both_directions():
+    lowercase = S.String.check(S.pattern(r"^[a-z]+$"))
+    failure = S.RefinementFailed(
+        path=(), message="expected a string matching ^[a-z]+$", actual="AB"
+    )
 
-    assert E.run_sync_exit(S.decode(name)("ab")) == ok("ab")
-    assert E.run_sync_exit(S.decode(name)("a")) == bad(
-        S.RefinementFailed(
-            path=(), message="expected a length of at least 2", actual="a"
-        )
-    )
-    assert E.run_sync_exit(S.decode(name)("abcd")) == bad(
-        S.RefinementFailed(
-            path=(), message="expected a length of at most 3", actual="abcd"
-        )
-    )
-    assert E.run_sync_exit(S.decode(name)("AB")) == bad(
-        S.RefinementFailed(
-            path=(), message="expected a string matching ^[a-z]+$", actual="AB"
-        )
-    )
-    assert E.run_sync_exit(S.decode(percent)(100)) == ok(100)
-    assert E.run_sync_exit(S.decode(percent)(101)) == bad(
-        S.RefinementFailed(path=(), message="expected a number at most 100", actual=101)
-    )
-    assert E.run_sync_exit(S.decode(percent)(-1)) == bad(
-        S.RefinementFailed(path=(), message="expected a number at least 0", actual=-1)
-    )
-    assert E.run_sync_exit(S.decode(open_unit)(0)) == bad(
-        S.RefinementFailed(
-            path=(), message="expected a number greater than 0", actual=0
-        )
-    )
-    assert E.run_sync_exit(S.decode(open_unit)(1)) == bad(
-        S.RefinementFailed(path=(), message="expected a number less than 1", actual=1)
-    )
+    matched = E.run_sync_exit(S.decode(lowercase)("ab"))
+    decode_rejected = E.run_sync_exit(S.decode(lowercase)("AB"))
+    encode_rejected = E.run_sync_exit(S.encode(lowercase)("AB"))
+
+    assert matched == ok("ab")
+    assert decode_rejected == bad(failure)
+    assert encode_rejected == bad(failure)
 
 
 RAW_USER = {

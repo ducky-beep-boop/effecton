@@ -11,7 +11,7 @@ import dataclasses
 import json
 import re
 import typing
-from collections.abc import Callable, Iterable, Mapping, Sized
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import MISSING, dataclass
 from datetime import date, datetime
 from types import NoneType, UnionType
@@ -596,16 +596,6 @@ def filter[A](predicate: Callable[[A], bool], *, message: str) -> Check[A]:
     return Check(predicate, message)
 
 
-def min_length(n: int) -> Check[Sized]:
-    """A length of at least n."""
-    return filter(lambda v: len(v) >= n, message=f"expected a length of at least {n}")
-
-
-def max_length(n: int) -> Check[Sized]:
-    """A length of at most n."""
-    return filter(lambda v: len(v) <= n, message=f"expected a length of at most {n}")
-
-
 def pattern(regex: str) -> Check[str]:
     """A string the regular expression finds a match in."""
     compiled = re.compile(regex)
@@ -613,26 +603,6 @@ def pattern(regex: str) -> Check[str]:
         lambda v: compiled.search(v) is not None,
         message=f"expected a string matching {regex}",
     )
-
-
-def greater_than(n: float) -> Check[float]:
-    """A number strictly greater than n."""
-    return filter(lambda v: v > n, message=f"expected a number greater than {n}")
-
-
-def greater_than_or_equal_to(n: float) -> Check[float]:
-    """A number of at least n."""
-    return filter(lambda v: v >= n, message=f"expected a number at least {n}")
-
-
-def less_than(n: float) -> Check[float]:
-    """A number strictly less than n."""
-    return filter(lambda v: v < n, message=f"expected a number less than {n}")
-
-
-def less_than_or_equal_to(n: float) -> Check[float]:
-    """A number of at most n."""
-    return filter(lambda v: v <= n, message=f"expected a number at most {n}")
 
 
 def _primitive[T](expected: str, accepts: Callable[[object], bool]) -> Schema[T, T]:
