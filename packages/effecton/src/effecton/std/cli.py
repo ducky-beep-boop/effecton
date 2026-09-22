@@ -145,23 +145,6 @@ class Argument:
     schema: S.Schema[Any, str] | None = None
 
 
-@dataclass(frozen=True)
-class _Param:
-    """One field of an Args class as the command line sees it."""
-
-    field: str
-    key: str  # display name and wire key: "--package" or "PACKAGE"
-    short: str | None
-    help: str
-    metavar: str | None  # None for a flag
-    codec: S.Schema[Any, Any]
-    positional: bool
-    flag: bool
-    repeated: bool
-    required: bool
-    default_text: str | None
-
-
 @dataclass_transform(frozen_default=True, kw_only_default=True)
 class Args:
     """Subclass to declare a command's arguments: annotations are the decoded types.
@@ -298,7 +281,45 @@ def _usage_error(error: Any, reason: str) -> str:
     return f"{error.usage}\nTry '{error.command} --help' for help.\n\n{reason}"
 
 
+@dataclass(frozen=True)
+class _Param:
+    """One field of an Args class as the command line sees it."""
+
+    field: str
+    key: str  # display name and wire key: "--package" or "PACKAGE"
+    short: str | None
+    help: str
+    metavar: str | None  # None for a flag
+    codec: S.Schema[Any, Any]
+    positional: bool
+    flag: bool
+    repeated: bool
+    required: bool
+    default_text: str | None
+
+
 def _plan_params(cls: type[Any]) -> tuple[_Param, ...]:
+    def _metavar_for(annotation: Any) -> str | None:
+        """The metavar inferable for an annotation, or None when it has none.
+
+        Used for a field with an explicit schema=: the annotation still picks
+        the metavar when it is one of the standard inferable types, falling
+        back to VALUE only when it is not (which is also why a schema was
+        required).
+        """
+        try:
+            return _text_codec(annotation, "")[1]
+        except TypeError:
+            return None
+
+    def _optional(codec: S.Schema[Any, Any]) -> S.Schema[Any, Any]:
+        """Decode as the codec does (the wire never carries None); encode as None."""
+
+        def encode(value: Any, path: S.IssuePath) -> Any:
+            return None if value is None else codec._encode(value, path)
+
+        return S.Schema(codec._decode, encode)
+
     hints = typing.get_type_hints(cls, include_extras=True)
     params: list[_Param] = []
     owner_of: dict[str, str] = {}
@@ -351,6 +372,8 @@ def _plan_params(cls: type[Any]) -> tuple[_Param, ...]:
                 raise TypeError(f"{where}: Cli.Argument cannot be a flag")
             if f.default is not False:
                 raise TypeError(f"{where}: a flag's default must be False")
+            if spec.metavar is not None:
+                raise TypeError(f"{where}: a flag takes no metavar")
             codec, metavar = S.Bool, None
         else:
             if optional:
@@ -442,28 +465,6 @@ def _text_codec(annotation: Any, where: str) -> tuple[S.Schema[Any, str], str]:
     )
 
 
-def _metavar_for(annotation: Any) -> str | None:
-    """The metavar inferable for an annotation, or None when it has none.
-
-    Used for a field with an explicit schema=: the annotation still picks the
-    metavar when it is one of the standard inferable types, falling back to
-    VALUE only when it is not (which is also why a schema was required).
-    """
-    try:
-        return _text_codec(annotation, "")[1]
-    except TypeError:
-        return None
-
-
-def _optional(codec: S.Schema[Any, Any]) -> S.Schema[Any, Any]:
-    """Decode as the codec does (the wire never carries None); encode None as None."""
-
-    def encode(value: Any, path: S.IssuePath) -> Any:
-        return None if value is None else codec._encode(value, path)
-
-    return S.Schema(codec._decode, encode)
-
-
 def _dispatch(
     command: Command[Any, Any],
     path: list[str],
@@ -477,7 +478,7 @@ def _dispatch(
         if tokens and tokens[0] == "--help":
             return _print(_help(command, command_path, is_root))
         if is_root and tokens and tokens[0] == "--version":
-            return sync(lambda: print(f"{root.name} {_distribution_version(root)}"))
+            return _print_version(root)
         if not tokens:
             return fail(MissingCommand(command_path, usage))
         if tokens[0].startswith("-"):
@@ -491,7 +492,7 @@ def _dispatch(
     if "--help" in before_separator:
         return _print(_help(command, command_path, is_root))
     if is_root and "--version" in before_separator:
-        return sync(lambda: print(f"{root.name} {_distribution_version(root)}"))
+        return _print_version(root)
     if command._handler is None:
         return _print(_help(command, command_path, is_root))
 
@@ -581,6 +582,10 @@ def _usage_line(command: Command[Any, Any], command_path: str) -> str:
 
 def _print(text: str) -> Effect[None]:
     return sync(lambda: print(text, end=""))
+
+
+def _print_version(root: Command[Any, Any]) -> Effect[None]:
+    return sync(lambda: print(f"{root.name} {_distribution_version(root)}"))
 
 
 def _help(command: Command[Any, Any], command_path: str, is_root: bool) -> str:

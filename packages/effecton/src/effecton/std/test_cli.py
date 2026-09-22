@@ -2,7 +2,7 @@ import dataclasses
 import importlib.metadata
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Literal, final
 
 import pytest
 
@@ -205,6 +205,27 @@ def test_explicit_names_override_the_defaults():
                 {"__annotations__": {"verbose": Annotated[bool, Cli.Argument()]}},
             ),
             "Bad.verbose: Cli.Argument cannot be a flag",
+        ),
+        (
+            lambda: type(
+                "Bad",
+                (Cli.Args,),
+                {
+                    "__annotations__": {
+                        "verbose": Annotated[bool, Cli.Option(metavar="X")]
+                    },
+                    "verbose": False,
+                },
+            ),
+            "Bad.verbose: a flag takes no metavar",
+        ),
+        (
+            lambda: type(
+                "Bad",
+                (Cli.Args,),
+                {"__annotations__": {"target": Annotated[str, Cli.Argument(name="")]}},
+            ),
+            "Bad.target: Argument name must not be empty",
         ),
         (
             lambda: type(
@@ -731,20 +752,49 @@ def test_version_dies_when_no_distribution_owns_the_module():
     )
 
 
-@pytest.mark.parametrize(
-    ("argv", "code"),
-    [
-        (("add", "--package", "effecton", "--bump", "patch", "--message", "m"), 0),
-        (("bogus",), 2),
-    ],
-)
-def test_run_main_exit_codes(argv, code):
+def test_run_main_returns_none_and_prints_nothing_on_success(capsys):
     program = Cli.run(documented_app()).provide(E.Process.Protocol)(
-        E.Process.Test(arguments=argv)
+        E.Process.Test(
+            arguments=(
+                "add",
+                "--package",
+                "effecton",
+                "--bump",
+                "patch",
+                "--message",
+                "m",
+            )
+        )
+    )
+
+    result = E.run_main(program)
+
+    assert result is None
+    assert capsys.readouterr().out == ""
+
+
+def test_run_main_exits_2_on_a_usage_error():
+    program = Cli.run(documented_app()).provide(E.Process.Protocol)(
+        E.Process.Test(arguments=("bogus",))
     )
 
     with pytest.raises(SystemExit) as info:
         E.run_main(program)
-        raise SystemExit(0)
 
-    assert info.value.code == code
+    assert info.value.code == 2
+
+
+def test_run_main_exits_1_on_a_handler_failure():
+    @final
+    @dataclasses.dataclass(frozen=True)
+    class Boom(E.EffectonError):
+        def __str__(self) -> str:
+            return "boom"
+
+    cmd = Cli.command("x", handler=lambda: E.fail(Boom()))
+    program = Cli.run(cmd).provide(E.Process.Protocol)(E.Process.Test(arguments=()))
+
+    with pytest.raises(SystemExit) as info:
+        E.run_main(program)
+
+    assert info.value.code == 1

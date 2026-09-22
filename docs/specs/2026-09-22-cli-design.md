@@ -92,6 +92,7 @@ Definition-time `TypeError`s, with exact messages:
 
 - `Add.amount: no text codec can be inferred for <class 'decimal.Decimal'>; pass one with Cli.Option(schema=...)` for any other annotation, including a `Literal` with a non-`str` value, `bool | None`, `tuple[bool, ...]` and nested tuples.
 - `Add.dry_run: a flag's default must be False` when a `bool` field has no default or a default other than `False`.
+- `Bad.verbose: a flag takes no metavar` when a `bool` field is given `Cli.Option(metavar=...)`.
 - `Add.port: an optional field's default must be None` when a `T | None` field has no default or a default other than `None`.
 - `Notes.name: Argument name must not be empty` when `Cli.Argument(name="")` is given.
 - `Notes: argument 'rest' cannot follow the variadic argument 'files'` when a positional comes after a `tuple[T, ...]` positional.
@@ -206,7 +207,7 @@ Try 'changeset add --help' for help.
 
 | Error | Extra fields | Reason |
 | --- | --- | --- |
-| `UnknownOption` | `option: str` | `No such option '--foo'.` (the token as given, up to any `=`) |
+| `UnknownOption` | `option: str` | `No such option '--foo'.` (the token as given; a long option is cut at its first `=`, a short token is kept whole) |
 | `UnknownCommand` | `name: str` | `No such command 'foo'.` |
 | `MissingCommand` | | `Missing command.` |
 | `MissingOptionValue` | `option: str` | `Option '--package' requires a value.` |
@@ -221,7 +222,7 @@ Through `E.run_main` a usage error is logged like any failure and exits with 2; 
 ## Migration
 
 - **changesets**: `cli.py` builds the root command from `add`, `status`, `version` and `notes` `Command` values exported by the per-command modules and `run()` is the entry point shown above. `add`'s manual bump check becomes the `Literal` codec and the empty-message check the refinement shown above; `typer.echo` calls become `E.sync(lambda: print(...))` inside the handler effect. `test_cli.py` keeps its subprocess tests (exit codes and stderr contents are unchanged) and gains a usage-error case asserting exit code 2 and `Missing option '--package'.`.
-- **api-reference**: `api-reference generate --out PATH` keeps its shape with `Generate(Cli.Args)` holding `out: Annotated[E.Path, Cli.Option(help=...)] = E.Path("docs/src/pages/api.md")`; the entry point now also provides `E.Process.Live()`.
+- **api-reference**: the command stays a single root leaf, invoked as `api-reference --out PATH` (typer collapsed its one command into the root, so `Cli.command` collapses it the same way: one `Command` with `args=Generate`, no `with_subcommands`), with `Generate(Cli.Args)` holding `out: Annotated[E.Path, Cli.Option(help=...)] = E.Path("docs/src/pages/api.md")`; the entry point provides `E.FileSystem.AsyncLive()` and `E.Process.Live()`.
 - **skills-cli**: one root command with `Install(Cli.Args)` holding `skill_url: Annotated[str, Cli.Argument(help=...)]`. `Terminal.Live.confirm` replaces `typer.confirm` with a `sync` effect around `input(f"{prompt} [y/N]: ")`, answering `True` for `y`/`yes` in any case; `EOFError` and `KeyboardInterrupt` stay defects. `cli.py` exports `app` and `run()`; `test_cli.py` drops `CliRunner` and the monkeypatching and runs `E.run_sync(Cli.run(app).provide(E.Process.Protocol)(E.Process.Test(arguments=("https://…",))).provide(...)(other Test services))`, asserting stdout through `capsys` and failures through `E.run_sync_exit`. The `@todo` comment goes.
 - `typer` is removed from the three `pyproject.toml` files and the lockfile.
 
