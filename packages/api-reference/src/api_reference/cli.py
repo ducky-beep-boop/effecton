@@ -36,17 +36,12 @@ def run_generate(
     )
 
 
-generate = Cli.command(
-    "generate",
-    args=Generate,
-    handler=run_generate,
-    help="Render the API Reference page from the effecton sources.",
-)
-
 app = Cli.command(
     "api-reference",
+    args=Generate,
+    handler=run_generate,
     help="Render the docs API Reference page from the effecton sources.",
-).with_subcommands(generate)
+)
 
 
 def run() -> None:
