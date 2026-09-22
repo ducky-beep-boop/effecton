@@ -13,6 +13,10 @@ Verify every change as follows:
 - Type behavior is pinned in `src/effecton/test_types_*.py` through `assert_type` calls plus deliberate `# ty: ignore[rule]` negative assertions; `unused-ignore-comment = "error"` makes them self-checking. Every pin lives inside an underscore-prefixed function that is never called, so importing the module evaluates nothing (module level holds only imports, class definitions, and plain helper functions); decorated definitions and negative subclass pins nest inside those functions too. Prefix never-read annotated locals with an underscore (`_must_be_int: E.Effect[str] = ...`) so ruff's F841 unsafe fix doesn't strip the pin.
 - Every user-facing change (new or changed public API, behavior, or CLI output) must include a changeset. Internal-only changes such as refactors, test tweaks, tooling, or config need none. For now, we do not follow SemVer: default to a patch bump unless the user requests otherwise. Create it with `uv run changeset add --package effecton --bump patch --message "Describe the change"`.
 
+## Design specs
+
+Design documents live in `docs/specs/YYYY-MM-DD-<topic>-design.md` and are committed. Write one there for every feature that goes through a design phase (the brainstorming skill's default `docs/superpowers/specs/` location is overridden by this rule), and keep it in step with the code as the implementation changes it: the spec describes the library as shipped, not the first draft. A spec is complete enough when a fresh agent can rebuild the feature from it alone and pass the existing tests, so it pins exact error messages, rendering and edge behavior, not only the API. Implementation plans, task briefs and SDD ledgers are working artifacts: keep them under the git-ignored `docs/superpowers/plans/` or `.superpowers/` and never commit them. ruff excludes `docs/specs` so the code blocks inside specs are not reformatted.
+
 ## Naming and API design
 
 Follow these rules when adding or changing public API:
