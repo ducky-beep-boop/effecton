@@ -116,3 +116,25 @@ def latest_release(
     raw = yield from response.json()
     return (yield from S.decode(Release)(raw))
 ```
+
+## Compared to pydantic
+
+`E.Schema` covers the same ground as pydantic's models and `TypeAdapter`, but makes different choices where the effect system or strictness calls for them.
+
+| | pydantic | `E.Schema` |
+| --- | --- | --- |
+| Validation result | Raises `ValidationError` | Returns `Effect[A, ParseError]`; nothing runs until the effect runs, and the error travels in the typed `E` channel |
+| Coercion | Lax by default: `"36"` becomes `36`, `1` becomes `True` | Strict only: `S.Int` rejects `"36"`, `36.0` and `True` |
+| Encoding | `model_dump()` and `model_dump_json()`, with serializers configured separately from validators | Every schema is a codec pair, so `encode` is derived from the same definition and round-trips by construction |
+| Wire conversions | Built in for `datetime`, `UUID`, `Path`, enums and more | Explicit: `created: datetime` is a `TypeError`; write `S.field(S.DateTimeFromString)` |
+| Models | `BaseModel`, mutable by default, configured through `model_config` | `S.Struct`: a frozen, keyword-only dataclass with no config object |
+| Containers | `list[T]`, `dict[str, T]`, `set[T]` | `tuple[T, ...]` and `Mapping[str, T]`; arrays decode to tuples |
+| Constraints | `Field(gt=0, min_length=2)` or `Annotated[int, Gt(0)]` | `schema.check(S.filter(lambda n: n > 0, message=...))` and `S.pattern` |
+| Custom logic | `@field_validator`, `@model_validator`, `@field_serializer` | `S.transform` and `S.transform_or_fail`, each with a `decode=` and an `encode=` function |
+| Ad-hoc schemas | `TypeAdapter(list[int])` | Combinators are values: `S.Array(S.Int)`, `S.Union(...)`, `S.Record(...)` |
+| Unknown keys | Ignored by default; can be forbidden or kept | Ignored |
+| Aliases | `Field(alias=...)`, `validation_alias`, `serialization_alias` | One `key=`, used in both directions |
+| Recursive models | Supported, including forward references | Not supported; nested structs are defined first |
+| JSON Schema | `model_json_schema()` | Not available |
+| Runtime | Rust core (`pydantic-core`) | Pure Python, no dependencies |
+| Type checker | mypy and pyright through a plugin or `dataclass_transform` | Designed for ty: `dataclass_transform` types fields and `__init__`, and the decoded and encoded types are pinned |
