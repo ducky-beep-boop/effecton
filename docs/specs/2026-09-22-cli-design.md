@@ -21,7 +21,7 @@ Environment variable fallback, shell completion, grouped short flags (`-vq`), `-
 
 Three layers, each a pure function over the previous one:
 
-1. **Declaration.** `Cli.Args.__init_subclass__` turns the class into a frozen keyword-only dataclass and builds a `Schema[Args, dict[str, object]]` through the schema module's struct builder, which is generalized to take a per-field resolver `(field, hint) -> (wire key, schema)`. `S.Struct` passes its own resolver (`S.field` metadata plus JSON inference); `Cli.Args` passes one that reads `Cli.Option` / `Cli.Argument` from `Annotated` metadata and infers a text codec (`Schema[T, str]`) from the annotation. The wire key of a field is its display name (`--package` or `PACKAGE`), so issue paths already read as option names. Type hints are read with `include_extras=True` in both cases and `Annotated` is unwrapped for `S.Struct`. Default values are validated against the field's schema at class definition exactly as for structs.
+1. **Declaration.** `Cli.Args.__init_subclass__` turns the class into a frozen keyword-only dataclass and builds a `Schema[Args, dict[str, object]]` through the schema module's struct builder, which is generalized to take a per-field resolver `(field, hint, where) -> (wire key, schema)`, `where` being the dotted `Class.field` name for error messages. `S.Struct` passes its own resolver (`S.field` metadata plus JSON inference); `Cli.Args` passes one that reads `Cli.Option` / `Cli.Argument` from `Annotated` metadata and infers a text codec (`Schema[T, str]`) from the annotation. The wire key of a field is its display name (`--package` or `PACKAGE`), so issue paths already read as option names. Type hints are read with `include_extras=True` in both cases and `Annotated` is unwrapped for `S.Struct`. Default values are validated against the field's schema at class definition exactly as for structs.
 2. **Tokenizing.** `argv` tokens are matched against the command tree and, for the leaf command, against its option and argument table, producing a raw `dict[str, object]` keyed by display name: `str` for a valued option or positional, `True` for a flag, `list[str]` for a repeated field. Keys not given are absent, so struct defaults apply. This step knows nothing about types beyond "flag or value".
 3. **Decoding and running.** `S.decode(schema)(raw)` produces the `Args` instance or a `ParseError`, which becomes `InvalidArguments`. The handler runs with the instance.
 
@@ -70,7 +70,7 @@ class Notes(Cli.Args):
 
 ### Text inference
 
-The codec is inferred from the annotation (after unwrapping `Annotated`); `schema=` wins when given, and then the annotation only decides flag-ness, repetition and optionality as below.
+The codec is inferred from the annotation (after unwrapping `Annotated`); `schema=` wins when given, and then the annotation only decides flag-ness, repetition and optionality as below. A PEP 695 alias (`type Bump = Literal["major", "minor", "patch"]`) is unwrapped through its `__value__` before inference runs, so `Bump` in the declaration above infers `S.Literal("major", "minor", "patch")` exactly as the spelled-out `Literal` would.
 
 | Annotation | Codec | Metavar |
 | --- | --- | --- |
@@ -84,13 +84,16 @@ The codec is inferred from the annotation (after unwrapping `Annotated`); `schem
 | `bool` | flag: `S.Bool`; present is `True` | none |
 | `T \| None` | the codec of `T` on decode (the wire never carries `None`), and `None` encodes to `None`; the default must be `None` | metavar of `T` |
 | `tuple[T, ...]` | `S.Array(codec of T)`; every occurrence is collected | metavar of `T` |
-| explicit `schema=` | as given | `VALUE` unless `metavar=` |
+| explicit `schema=` | as given | metavar of the annotation when it is a table entry above, else `VALUE`; `metavar=` overrides either |
+
+An explicit `schema=` still runs the annotation through the table for its metavar only: `Cli.Option(schema=S.String.check(...))` on a `str` field gets `TEXT` (the `--message` row in the help example below), while a `schema=` on an annotation with no standard codec (such as `Decimal`) falls back to `VALUE` unless `metavar=` is also given.
 
 Definition-time `TypeError`s, with exact messages:
 
 - `Add.amount: no text codec can be inferred for <class 'decimal.Decimal'>; pass one with Cli.Option(schema=...)` for any other annotation, including a `Literal` with a non-`str` value, `bool | None`, `tuple[bool, ...]` and nested tuples.
 - `Add.dry_run: a flag's default must be False` when a `bool` field has no default or a default other than `False`.
 - `Add.port: an optional field's default must be None` when a `T | None` field has no default or a default other than `None`.
+- `Notes.name: Argument name must not be empty` when `Cli.Argument(name="")` is given.
 - `Notes: argument 'rest' cannot follow the variadic argument 'files'` when a positional comes after a `tuple[T, ...]` positional.
 - `Notes: argument 'name' cannot follow the optional argument 'package'` when a required positional follows one with a default.
 - `Add: fields 'package' and 'pkg' share the wire key '--package'` (also for a `short` shared by two fields, with the short name as the key).
@@ -107,7 +110,7 @@ app = Cli.command("changeset", help="Changeset-based changelog and version manag
 ```
 
 - `Cli.command(name, *, help="", args: type[T], handler: Callable[[T], Effect[None, E, R]]) -> Command[E, R]`; `Cli.command(name, *, help="", handler: Callable[[], Effect[None, E, R]]) -> Command[E, R]`; `Cli.command(name, *, help="") -> Command[Never, Never]`. All parameters after `name` are keyword-only so a class and a callable can never be confused positionally.
-- `Command[E, R]` is `@final`, immutable, covariant in both parameters (declared through old-style TypeVars, see the ty notes in `CLAUDE.md`), and exposes `name` and `help`. `Cli.command` also records the `__name__` of the module that called it (`sys._getframe(1).f_globals["__name__"]`), which `--version` uses when the command is the root; `with_subcommands` keeps it. `with_subcommands(*commands: Command[E2, R2]) -> Command[E | E2, R | R2]` returns a new command; calling it on a command that has a handler, or twice, raises `TypeError("changeset: a command has either a handler or subcommands")` / `TypeError("changeset: subcommands are already set")`; two subcommands with the same name raise `TypeError("changeset: two subcommands are named 'add'")`. `Command` is not exported from `E`; it is reachable through `Cli.Command`.
+- `Command[E, R]` is `@final @dataclass(frozen=True)`, generic over old-style covariant TypeVars (see the ty notes in `CLAUDE.md`), and exposes `name` and `help`. Its remaining fields are private (`_module`, `_args`, `_handler`, `_subcommands`) but the dataclass has no other constructor, so tests build a bare command positionally: `Cli.Command(name, help, module, args, handler, subcommands)`, e.g. `Cli.Command("prog", "", "__main__", None, None, ())`. `Cli.command` also records the `__name__` of the module that called it (`sys._getframe(1).f_globals["__name__"]`), which `--version` uses when the command is the root; `with_subcommands` keeps it. `with_subcommands(*commands: Command[E2, R2]) -> Command[E | E2, R | R2]` returns a new command; calling it on a command that has a handler, or twice, raises `TypeError("changeset: a command has either a handler or subcommands")` / `TypeError("changeset: subcommands are already set")`; two subcommands with the same name raise `TypeError("changeset: two subcommands are named 'add'")`. `Command` is not exported from `E`; it is reachable through `Cli.Command`.
 - `Cli.run(command) -> Effect[None, E | UsageError, R | E.Process.Protocol]`. It is not curried: unlike `provide` and `catch`, nothing in its types needs the two-step form, and the arguments come from `E.Process.argv()` rather than a parameter. The command's `name` is the program name in usage lines.
 - **`--version`** is always available on the root command and prints `<name> <version>`. The version is derived the way Click's `version_option` does it, resolved only when `--version` is given: take the top-level package of the module that defined the root command (`changesets.cli` gives `changesets`), map it through `importlib.metadata.packages_distributions()`, and read `importlib.metadata.version` of that distribution. Editable installs, which is what `uv sync` makes of workspace members, do not appear in `packages_distributions()`, so when the package maps to nothing the lookup falls back to a distribution named like the package (`skills_cli` finds `skills-cli`, since metadata lookups normalise `_` and `-`). This reads the installed distribution's metadata, written from `pyproject.toml` at build time, so no project file is read. When the module is `__main__`, when neither lookup finds a distribution, or when the mapping yields more than one, `--version` dies with `RuntimeError("changeset: cannot determine the version: module 'x' belongs to no installed distribution")` (or `... belongs to several installed distributions: a, b`, names sorted). This is a defect, as in Click, because it means the program is mis-packaged rather than misused.
 
@@ -126,15 +129,18 @@ def run() -> None:
 Walk the command tree from the root with the remaining tokens:
 
 1. **A command with subcommands.** If the first token is `--help`, print this command's help and succeed. If this is the root and the first token is `--version`, print `<name> <version>` and succeed. No tokens: `MissingCommand`. A token starting with `-`: `UnknownOption`. Otherwise look the token up among the subcommands (`UnknownCommand` if absent) and recurse with the rest.
-2. **A leaf command** reads tokens left to right:
-   - `--` ends option parsing; every later token is positional.
-   - `--help` before `--` prints the leaf's help and succeeds, whatever else the tokens contain; `--version` does the same when the leaf is the root command.
-   - `--name=value` and `--name value`: the value is the next token verbatim, even if it starts with `-`; a missing next token is `MissingOptionValue`. A flag given `=value` is `UnexpectedOptionValue`. An unknown name is `UnknownOption`.
-   - `-x value` for a declared short flag, with the same rules; `-x=value` and `-xvalue` are not recognised, so `-xvalue` is `UnknownOption`. A lone `-` is positional. A negative number such as `-1` is an unknown option unless it follows `--`.
-   - Anything else is positional and fills the `Cli.Argument` fields in declaration order; a trailing `tuple[T, ...]` argument takes every remaining positional; a positional with nowhere to go is `UnexpectedArgument`.
-   - A scalar option given twice keeps the last value. A `tuple[T, ...]` option keeps every occurrence in order. A flag is `True` on the first occurrence.
-   - Tokenizing stops at the first usage error; the raw dict is then decoded and every schema issue is reported together as one `InvalidArguments`.
-3. Run the handler with the decoded `Args` (or with no arguments when the command has none). A command with neither a handler nor subcommands prints its help and succeeds, whatever the tokens.
+2. **A leaf command** checks, in this order, before it tokenizes anything:
+   - Split the tokens on the first `--`, if any, into a before-separator slice and the rest. If `--help` appears anywhere in the before-separator slice, print the leaf's help and succeed, whatever else the tokens contain.
+   - If the leaf is also the root command and `--version` appears anywhere in the before-separator slice, print `<name> <version>` and succeed.
+   - If the command has neither a handler nor subcommands (a placeholder command), print its help and succeed, whatever the tokens.
+   - Otherwise tokenize left to right:
+     - `--` ends option parsing; every later token is positional.
+     - `--name=value` and `--name value`: the value is the next token verbatim, even if it starts with `-`; a missing next token is `MissingOptionValue`. A flag given `=value` is `UnexpectedOptionValue`. An unknown name is `UnknownOption`.
+     - `-x value` for a declared short flag, with the same rules; `-x=value` and `-xvalue` are not recognised, so `-xvalue` is `UnknownOption`. A lone `-` is positional. A negative number such as `-1` is an unknown option unless it follows `--`.
+     - Anything else is positional and fills the `Cli.Argument` fields in declaration order; a trailing `tuple[T, ...]` argument takes every remaining positional; a positional with nowhere to go is `UnexpectedArgument`.
+     - A scalar option given twice keeps the last value. A `tuple[T, ...]` option keeps every occurrence in order. A flag is `True` on the first occurrence.
+     - Tokenizing stops at the first usage error; the raw dict is then decoded and every schema issue is reported together as one `InvalidArguments`.
+3. Run the handler with the decoded `Args` (or with no arguments when the command has none).
 
 ## Help
 
@@ -228,6 +234,6 @@ Through `E.run_main` a usage error is logged like any failure and exits with 2; 
 
 ## Risks
 
-- **Union inference through `*commands`.** `with_subcommands` relies on ty joining `E2` and `R2` across variadic arguments into a union. A typing spike must confirm this before implementation; the fallback is the `Tuple`/`Union` pattern in `schema.py`: precise overloads up to four subcommands and `Any` beyond.
+- **Union inference through `*commands`.** `with_subcommands(self, *commands: Command[E2, R2]) -> Command[_E | E2, _R | R2]` relies on ty joining `E2` and `R2` across variadic arguments into a union; `test_types_cli.py`'s `_with_subcommands_unions_errors_and_requirements` confirms ty solves the single generic signature directly (`app.with_subcommands(add, status)` pins to `Cli.Command[AddFailed | StatusFailed, E.FileSystem.Protocol | E.Process.Protocol]`), so the shipped code needed no overload fallback and none of the `Tuple`/`Union` precise-overloads-plus-`Any` pattern from `schema.py`.
 - **`Callable[[T], Effect[None, E, R]]` against `@gen` handlers.** A `@gen` function returns an `Effect`, so this should infer; a handler written as a lambda returning `E.success(None)` yields `Effect[None, Never, Never]`, which must not widen the union to `Unknown`.
 - **Shared struct builder.** Generalizing `_struct_schema` touches the shipped Schema; the existing tests pin its behavior and the refactor adds no public API.
