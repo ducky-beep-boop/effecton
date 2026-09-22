@@ -684,6 +684,7 @@ def test_arguments_section_and_defaults(capsys):
         "  --tags TEXT     Tags. [default: a, b]\n"
         "  --port INTEGER  Port.\n"
         "  --secret TEXT   [default: s]\n"
+        "  --version       Show the version and exit.\n"
         "  --help          Show this message and exit.\n"
     )
 

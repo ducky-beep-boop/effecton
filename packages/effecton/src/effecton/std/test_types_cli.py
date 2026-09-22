@@ -100,3 +100,6 @@ def _cli_negative() -> None:
 
     # Only an Args class goes in args=.
     Cli.command("add", args=int, handler=run_add)  # ty: ignore[invalid-argument-type]
+
+    # Command is frozen.
+    Cli.command("x").name = "y"  # ty: ignore[invalid-assignment]

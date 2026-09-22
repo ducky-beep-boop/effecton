@@ -93,24 +93,16 @@ _R = TypeVar("_R", covariant=True)
 
 
 @final
+@dataclass(frozen=True)
 class Command(Generic[_E, _R]):  # noqa: UP046
     """A named command: E and R are the union over every handler beneath it."""
 
-    def __init__(
-        self,
-        name: str,
-        help: str,
-        module: str,
-        args: type[Args] | None,
-        handler: Callable[..., Effect[None, Any, Any]] | None,
-        subcommands: tuple[Command[Any, Any], ...],
-    ) -> None:
-        self.name = name
-        self.help = help
-        self._module = module
-        self._args = args
-        self._handler = handler
-        self._subcommands = subcommands
+    name: str
+    help: str
+    _module: str
+    _args: type[Args] | None
+    _handler: Callable[..., Effect[None, Any, Any]] | None
+    _subcommands: tuple[Command[Any, Any], ...]
 
     def with_subcommands[E2: EffectonError, R2](
         self, *commands: Command[E2, R2]
@@ -611,7 +603,7 @@ def _help(command: Command[Any, Any], command_path: str, is_root: bool) -> str:
     params = () if command._args is None else command._args.__cli_params__
     arguments = [(p.key, describe(p)) for p in params if p.positional]
     options = [(option_left(p), describe(p)) for p in params if not p.positional]
-    if is_root and command._handler is None:
+    if is_root:
         options.append(("--version", "Show the version and exit."))
     options.append(("--help", "Show this message and exit."))
     commands = [(c.name, c.help) for c in command._subcommands]
