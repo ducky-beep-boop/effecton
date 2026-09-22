@@ -82,7 +82,7 @@ The codec is inferred from the annotation (after unwrapping `Annotated`); `schem
 | `date` | `S.DateFromString` | `DATE` |
 | `Literal[...]` of `str` values | `S.Literal(...)` | `[a\|b\|c]` |
 | `bool` | flag: `S.Bool`; present is `True` | none |
-| `T \| None` | `S.NullOr(codec of T)`; the default must be `None` | metavar of `T` |
+| `T \| None` | the codec of `T` on decode (the wire never carries `None`), and `None` encodes to `None`; the default must be `None` | metavar of `T` |
 | `tuple[T, ...]` | `S.Array(codec of T)`; every occurrence is collected | metavar of `T` |
 | explicit `schema=` | as given | `VALUE` unless `metavar=` |
 
@@ -90,6 +90,7 @@ Definition-time `TypeError`s, with exact messages:
 
 - `Add.amount: no text codec can be inferred for <class 'decimal.Decimal'>; pass one with Cli.Option(schema=...)` for any other annotation, including a `Literal` with a non-`str` value, `bool | None`, `tuple[bool, ...]` and nested tuples.
 - `Add.dry_run: a flag's default must be False` when a `bool` field has no default or a default other than `False`.
+- `Add.port: an optional field's default must be None` when a `T | None` field has no default or a default other than `None`.
 - `Notes: argument 'rest' cannot follow the variadic argument 'files'` when a positional comes after a `tuple[T, ...]` positional.
 - `Notes: argument 'name' cannot follow the optional argument 'package'` when a required positional follows one with a default.
 - `Add: fields 'package' and 'pkg' share the wire key '--package'` (also for a `short` shared by two fields, with the short name as the key).
@@ -108,7 +109,7 @@ app = Cli.command("changeset", help="Changeset-based changelog and version manag
 - `Cli.command(name, *, help="", args: type[T], handler: Callable[[T], Effect[None, E, R]]) -> Command[E, R]`; `Cli.command(name, *, help="", handler: Callable[[], Effect[None, E, R]]) -> Command[E, R]`; `Cli.command(name, *, help="") -> Command[Never, Never]`. All parameters after `name` are keyword-only so a class and a callable can never be confused positionally.
 - `Command[E, R]` is `@final`, immutable, covariant in both parameters (declared through old-style TypeVars, see the ty notes in `CLAUDE.md`), and exposes `name` and `help`. `Cli.command` also records the `__name__` of the module that called it (`sys._getframe(1).f_globals["__name__"]`), which `--version` uses when the command is the root; `with_subcommands` keeps it. `with_subcommands(*commands: Command[E2, R2]) -> Command[E | E2, R | R2]` returns a new command; calling it on a command that has a handler, or twice, raises `TypeError("changeset: a command has either a handler or subcommands")` / `TypeError("changeset: subcommands are already set")`; two subcommands with the same name raise `TypeError("changeset: two subcommands are named 'add'")`. `Command` is not exported from `E`; it is reachable through `Cli.Command`.
 - `Cli.run(command) -> Effect[None, E | UsageError, R | E.Process.Protocol]`. It is not curried: unlike `provide` and `catch`, nothing in its types needs the two-step form, and the arguments come from `E.Process.argv()` rather than a parameter. The command's `name` is the program name in usage lines.
-- **`--version`** is always available on the root command and prints `<name> <version>`. The version is derived the way Click's `version_option` does it, resolved only when `--version` is given: take the top-level package of the module that defined the root command (`changesets.cli` gives `changesets`), map it through `importlib.metadata.packages_distributions()`, and read `importlib.metadata.version` of that distribution. This reads the installed distribution's metadata, written from `pyproject.toml` at build time and present for published wheels and `uv sync` workspace installs alike, so no project file is read. When the module is `__main__`, maps to no distribution, or maps to more than one, `--version` dies with `RuntimeError("changeset: cannot determine the version: module 'x' belongs to no installed distribution")` (or `... belongs to several installed distributions: a, b`). This is a defect, as in Click, because it means the program is mis-packaged rather than misused.
+- **`--version`** is always available on the root command and prints `<name> <version>`. The version is derived the way Click's `version_option` does it, resolved only when `--version` is given: take the top-level package of the module that defined the root command (`changesets.cli` gives `changesets`), map it through `importlib.metadata.packages_distributions()`, and read `importlib.metadata.version` of that distribution. Editable installs, which is what `uv sync` makes of workspace members, do not appear in `packages_distributions()`, so when the package maps to nothing the lookup falls back to a distribution named like the package (`skills_cli` finds `skills-cli`, since metadata lookups normalise `_` and `-`). This reads the installed distribution's metadata, written from `pyproject.toml` at build time, so no project file is read. When the module is `__main__`, when neither lookup finds a distribution, or when the mapping yields more than one, `--version` dies with `RuntimeError("changeset: cannot determine the version: module 'x' belongs to no installed distribution")` (or `... belongs to several installed distributions: a, b`, names sorted). This is a defect, as in Click, because it means the program is mis-packaged rather than misused.
 
 ```python
 def run() -> None:
@@ -133,7 +134,7 @@ Walk the command tree from the root with the remaining tokens:
    - Anything else is positional and fills the `Cli.Argument` fields in declaration order; a trailing `tuple[T, ...]` argument takes every remaining positional; a positional with nowhere to go is `UnexpectedArgument`.
    - A scalar option given twice keeps the last value. A `tuple[T, ...]` option keeps every occurrence in order. A flag is `True` on the first occurrence.
    - Tokenizing stops at the first usage error; the raw dict is then decoded and every schema issue is reported together as one `InvalidArguments`.
-3. Run the handler with the decoded `Args` (or with no arguments when the command has none).
+3. Run the handler with the decoded `Args` (or with no arguments when the command has none). A command with neither a handler nor subcommands prints its help and succeeds, whatever the tokens.
 
 ## Help
 
@@ -215,7 +216,7 @@ Through `E.run_main` a usage error is logged like any failure and exits with 2; 
 
 - **changesets**: `cli.py` builds the root command from `add`, `status`, `version` and `notes` `Command` values exported by the per-command modules and `run()` is the entry point shown above. `add`'s manual bump check becomes the `Literal` codec and the empty-message check the refinement shown above; `typer.echo` calls become `E.sync(lambda: print(...))` inside the handler effect. `test_cli.py` keeps its subprocess tests (exit codes and stderr contents are unchanged) and gains a usage-error case asserting exit code 2 and `Missing option '--package'.`.
 - **api-reference**: `api-reference generate --out PATH` keeps its shape with `Generate(Cli.Args)` holding `out: Annotated[E.Path, Cli.Option(help=...)] = E.Path("docs/src/pages/api.md")`; the entry point now also provides `E.Process.Live()`.
-- **skills-cli**: one root command with `Install(Cli.Args)` holding `skill_url: Annotated[str, Cli.Argument(help=...)]`. `cli.py` exports `app` and `run()`; `test_cli.py` drops `CliRunner` and the monkeypatching and runs `E.run_sync(Cli.run(app).provide(E.Process.Protocol)(E.Process.Test(arguments=("https://…",))).provide(...)(other Test services))`, asserting stdout through `capsys` and failures through `E.run_sync_exit`. The `@todo` comment goes.
+- **skills-cli**: one root command with `Install(Cli.Args)` holding `skill_url: Annotated[str, Cli.Argument(help=...)]`. `Terminal.Live.confirm` replaces `typer.confirm` with a `sync` effect around `input(f"{prompt} [y/N]: ")`, answering `True` for `y`/`yes` in any case; `EOFError` and `KeyboardInterrupt` stay defects. `cli.py` exports `app` and `run()`; `test_cli.py` drops `CliRunner` and the monkeypatching and runs `E.run_sync(Cli.run(app).provide(E.Process.Protocol)(E.Process.Test(arguments=("https://…",))).provide(...)(other Test services))`, asserting stdout through `capsys` and failures through `E.run_sync_exit`. The `@todo` comment goes.
 - `typer` is removed from the three `pyproject.toml` files and the lockfile.
 
 ## Testing
