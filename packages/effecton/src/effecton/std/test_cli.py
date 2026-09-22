@@ -729,3 +729,22 @@ def test_version_dies_when_no_distribution_owns_the_module():
         "prog: cannot determine the version: module '__main__' belongs to no "
         "installed distribution"
     )
+
+
+@pytest.mark.parametrize(
+    ("argv", "code"),
+    [
+        (("add", "--package", "effecton", "--bump", "patch", "--message", "m"), 0),
+        (("bogus",), 2),
+    ],
+)
+def test_run_main_exit_codes(argv, code):
+    program = Cli.run(documented_app()).provide(E.Process.Protocol)(
+        E.Process.Test(arguments=argv)
+    )
+
+    with pytest.raises(SystemExit) as info:
+        E.run_main(program)
+        raise SystemExit(0)
+
+    assert info.value.code == code
