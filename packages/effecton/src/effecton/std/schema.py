@@ -307,8 +307,9 @@ def field(
 ) -> Any:
     """Configure a Struct field: its schema, its wire key, its default.
 
-    A field with a default may be absent from the input. Without a schema,
-    one is inferred from the annotation.
+    A field with a default may be absent from the input; the default is
+    checked against the schema once, when the class is defined. Without a
+    schema, one is inferred from the annotation.
     """
     return dataclasses.field(
         default=default, metadata={_FIELD: _FieldSpec(schema=schema, key=key)}
@@ -701,6 +702,15 @@ def _struct_schema(cls: type[Any]) -> Schema[Any, dict[str, object]]:
                 f"share the wire key {key!r}"
             )
         owner_of[key] = f.name
+        if f.default is not MISSING:
+            # A default is a decoded value, so the schema's encode side checks it.
+            checked = schema._encode(f.default, ())
+            if isinstance(checked, _Issues):
+                reasons = "; ".join(str(issue) for issue in checked.issues)
+                raise TypeError(
+                    f"{cls.__name__}.{f.name}: the default {f.default!r} "
+                    f"does not satisfy its schema: {reasons}"
+                )
         plan.append((f.name, key, schema, f.default))
 
     def decode_struct(raw: object, path: IssuePath) -> Any:

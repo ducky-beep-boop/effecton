@@ -67,7 +67,7 @@ class User(S.Struct):
 
 - `Struct` is marked `@dataclass_transform(frozen_default=True, kw_only_default=True, field_specifiers=(field,))` and turns each subclass into a frozen, keyword-only dataclass in `__init_subclass__`.
 - The annotation is always the decoded type. A schema is inferred for `str`, `int`, `float`, `bool`, `None`, `T | None`, `tuple[T, ...]`, `Mapping[str, T]`, `Literal[...]`, and nested `Struct` subclasses. Any other annotation without `S.field(schema)` raises `TypeError` at class definition.
-- `S.field(schema=None, *, key=None, default=MISSING)`: `key` renames the wire key; a default makes the key optional on decode. Encoding always emits every field. Mutable defaults (`dict`, `list`) are rejected, as in dataclasses.
+- `S.field(schema=None, *, key=None, default=MISSING)`: `key` renames the wire key; a default makes the key optional on decode and is validated against the field's schema at class definition. Encoding always emits every field. Mutable defaults (`dict`, `list`) are rejected, as in dataclasses.
 - Unknown input keys are ignored on decode. Two fields sharing a wire key raise `TypeError` at class definition. Issue paths use wire keys when decoding and field names when encoding. Nested structs must be defined before the struct that references them.
 - `S.struct_schema(User)` exposes the underlying `Schema[User, dict[str, object]]` for use inside combinators (`S.Array(S.struct_schema(User))`); `S.Array` and `S.NullOr` also accept a `Struct` class directly, as do the four entry points.
 

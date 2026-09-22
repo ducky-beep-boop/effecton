@@ -656,6 +656,45 @@ def test_a_renamed_field_colliding_with_another_field_name_fails():
     assert str(raised.value) == "Pair: fields 'a' and 'b' share the wire key 'b'"
 
 
+def test_a_default_that_fails_its_schemas_check_fails_at_class_definition():
+    with pytest.raises(TypeError) as raised:
+
+        class Port(S.Struct):
+            number: int = S.field(
+                S.Int.check(
+                    S.filter(lambda n: 0 < n < 65536, message="expected a port")
+                ),
+                default=0,
+            )
+
+    assert str(raised.value) == (
+        "Port.number: the default 0 does not satisfy its schema: expected a port, got 0"
+    )
+
+
+def test_a_default_of_the_wrong_type_fails_at_class_definition():
+    with pytest.raises(TypeError) as raised:
+
+        class Config(S.Struct):
+            retries: int = S.field(S.Int, default="3")  # ty: ignore[invalid-argument-type]
+
+    assert str(raised.value) == (
+        "Config.retries: the default '3' does not satisfy its schema: "
+        "expected integer, got '3'"
+    )
+
+
+def test_a_default_is_validated_on_the_decoded_side():
+    class Event(S.Struct):
+        at: datetime = S.field(S.DateTimeFromString, default=datetime(2026, 1, 1))
+        tags: tuple[str, ...] = ()
+        nickname: str | None = None
+
+    decoded = E.run_sync_exit(S.decode(Event)({}))
+
+    assert decoded == ok(Event(at=datetime(2026, 1, 1), tags=(), nickname=None))
+
+
 def test_an_empty_wire_key_is_honored():
     class Odd(S.Struct):
         value: int = S.field(key="")

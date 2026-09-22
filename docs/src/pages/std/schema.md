@@ -32,7 +32,7 @@ user = S.decode(User)(raw)
 
 ## Structs
 
-A `Struct` subclass is a frozen, keyword-only dataclass, so the decoded value is a plain typed object. Annotations are the decoded types. A schema is inferred for `str`, `int`, `float`, `bool`, `None`, unions of those, `Literal[...]`, `tuple[T, ...]`, `Mapping[str, T]` and nested structs; anything else names its schema through `S.field(schema)`, or the class definition raises `TypeError`. `key=` renames the field on the wire, and a field with a default may be absent from the input; two fields may not share a wire key. Unknown input keys are ignored. A nested struct must be defined before the struct that references it: forward and self references are not supported. Issue paths use wire keys when decoding and field names when encoding.
+A `Struct` subclass is a frozen, keyword-only dataclass, so the decoded value is a plain typed object. Annotations are the decoded types. A schema is inferred for `str`, `int`, `float`, `bool`, `None`, unions of those, `Literal[...]`, `tuple[T, ...]`, `Mapping[str, T]` and nested structs; anything else names its schema through `S.field(schema)`, or the class definition raises `TypeError`. `key=` renames the field on the wire, and a field with a default may be absent from the input; a default its own schema rejects is a `TypeError` at class definition, as are two fields sharing a wire key. Unknown input keys are ignored. A nested struct must be defined before the struct that references it: forward and self references are not supported. Issue paths use wire keys when decoding and field names when encoding.
 
 ## Two directions
 
