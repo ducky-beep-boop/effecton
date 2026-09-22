@@ -82,7 +82,6 @@ source = { editable = "packages/changesets" }
 dependencies = [
     { name = "effecton" },
     { name = "python-frontmatter" },
-    { name = "typer" },
 ]
 
 [package.dev-dependencies]
@@ -94,7 +93,6 @@ dev = [
 requires-dist = [
     { name = "effecton", editable = "packages/effecton" },
     { name = "python-frontmatter", specifier = ">=1.1" },
-    { name = "typer", specifier = ">=0.15" },
 ]
 
 [package.metadata.requires-dev]
