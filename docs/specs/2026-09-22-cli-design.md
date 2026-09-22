@@ -11,7 +11,7 @@ A typer replacement for effecton: declare a command's arguments as an annotated 
 
 ## Non-goals (v1)
 
-Environment variable fallback, shell completion, grouped short flags (`-vq`), `--no-flag` forms, prompts, colors, help text wrapping, options on a command that also has subcommands (git-style global options), deriving the version from installed metadata inside the library, and a console service for output (handlers print through `E.sync(lambda: print(...))`).
+Environment variable fallback, shell completion, grouped short flags (`-vq`), `--no-flag` forms, prompts, colors, help text wrapping, options on a command that also has subcommands (git-style global options), an explicit version string (see `--version` below), and a console service for output (handlers print through `E.sync(lambda: print(...))`).
 
 ## Placement
 
@@ -106,13 +106,14 @@ app = Cli.command("changeset", help="Changeset-based changelog and version manag
 ```
 
 - `Cli.command(name, *, help="", args: type[T], handler: Callable[[T], Effect[None, E, R]]) -> Command[E, R]`; `Cli.command(name, *, help="", handler: Callable[[], Effect[None, E, R]]) -> Command[E, R]`; `Cli.command(name, *, help="") -> Command[Never, Never]`. All parameters after `name` are keyword-only so a class and a callable can never be confused positionally.
-- `Command[E, R]` is `@final`, immutable, covariant in both parameters (declared through old-style TypeVars, see the ty notes in `CLAUDE.md`), and exposes `name` and `help`. `with_subcommands(*commands: Command[E2, R2]) -> Command[E | E2, R | R2]` returns a new command; calling it on a command that has a handler, or twice, raises `TypeError("changeset: a command has either a handler or subcommands")` / `TypeError("changeset: subcommands are already set")`; two subcommands with the same name raise `TypeError("changeset: two subcommands are named 'add'")`. `Command` is not exported from `E`; it is reachable through `Cli.Command`.
-- `Cli.run(command, *, version: str | None = None) -> Effect[None, E | UsageError, R | E.Process.Protocol]`. It is not curried: unlike `provide` and `catch`, nothing in its types needs the two-step form, and the arguments come from `E.Process.argv()` rather than a parameter. `version` adds `--version` to the root command; entry points pass `importlib.metadata.version("<distribution>")`, which reads the installed distribution's metadata (written from `pyproject.toml` at build time, present for published wheels and `uv sync` workspace installs alike) rather than the project file. The command's `name` is the program name in usage lines.
+- `Command[E, R]` is `@final`, immutable, covariant in both parameters (declared through old-style TypeVars, see the ty notes in `CLAUDE.md`), and exposes `name` and `help`. `Cli.command` also records the `__name__` of the module that called it (`sys._getframe(1).f_globals["__name__"]`), which `--version` uses when the command is the root; `with_subcommands` keeps it. `with_subcommands(*commands: Command[E2, R2]) -> Command[E | E2, R | R2]` returns a new command; calling it on a command that has a handler, or twice, raises `TypeError("changeset: a command has either a handler or subcommands")` / `TypeError("changeset: subcommands are already set")`; two subcommands with the same name raise `TypeError("changeset: two subcommands are named 'add'")`. `Command` is not exported from `E`; it is reachable through `Cli.Command`.
+- `Cli.run(command) -> Effect[None, E | UsageError, R | E.Process.Protocol]`. It is not curried: unlike `provide` and `catch`, nothing in its types needs the two-step form, and the arguments come from `E.Process.argv()` rather than a parameter. The command's `name` is the program name in usage lines.
+- **`--version`** is always available on the root command and prints `<name> <version>`. The version is derived the way Click's `version_option` does it, resolved only when `--version` is given: take the top-level package of the module that defined the root command (`changesets.cli` gives `changesets`), map it through `importlib.metadata.packages_distributions()`, and read `importlib.metadata.version` of that distribution. This reads the installed distribution's metadata, written from `pyproject.toml` at build time and present for published wheels and `uv sync` workspace installs alike, so no project file is read. When the module is `__main__`, maps to no distribution, or maps to more than one, `--version` dies with `RuntimeError("changeset: cannot determine the version: module 'x' belongs to no installed distribution")` (or `... belongs to several installed distributions: a, b`). This is a defect, as in Click, because it means the program is mis-packaged rather than misused.
 
 ```python
 def run() -> None:
     E.run_main(
-        Cli.run(app, version=version("changesets"))
+        Cli.run(app)
         .provide(E.FileSystem.Protocol)(E.FileSystem.AsyncLive())
         .provide(E.Process.Protocol)(E.Process.Live())
         .provide(NameGenerator.Protocol)(NameGenerator.Live())
@@ -123,10 +124,10 @@ def run() -> None:
 
 Walk the command tree from the root with the remaining tokens:
 
-1. **A command with subcommands.** If the first token is `--help`, print this command's help and succeed. If this is the root, `version` was given and the first token is `--version`, print `<name> <version>` and succeed. No tokens: `MissingCommand`. A token starting with `-`: `UnknownOption`. Otherwise look the token up among the subcommands (`UnknownCommand` if absent) and recurse with the rest.
+1. **A command with subcommands.** If the first token is `--help`, print this command's help and succeed. If this is the root and the first token is `--version`, print `<name> <version>` and succeed. No tokens: `MissingCommand`. A token starting with `-`: `UnknownOption`. Otherwise look the token up among the subcommands (`UnknownCommand` if absent) and recurse with the rest.
 2. **A leaf command** reads tokens left to right:
    - `--` ends option parsing; every later token is positional.
-   - `--help` before `--` prints the leaf's help and succeeds, whatever else the tokens contain.
+   - `--help` before `--` prints the leaf's help and succeeds, whatever else the tokens contain; `--version` does the same when the leaf is the root command.
    - `--name=value` and `--name value`: the value is the next token verbatim, even if it starts with `-`; a missing next token is `MissingOptionValue`. A flag given `=value` is `UnexpectedOptionValue`. An unknown name is `UnknownOption`.
    - `-x value` for a declared short flag, with the same rules; `-x=value` and `-xvalue` are not recognised, so `-xvalue` is `UnknownOption`. A lone `-` is positional. A negative number such as `-1` is an unknown option unless it follows `--`.
    - Anything else is positional and fills the `Cli.Argument` fields in declaration order; a trailing `tuple[T, ...]` argument takes every remaining positional; a positional with nowhere to go is `UnexpectedArgument`.
@@ -174,7 +175,7 @@ Rules:
 - The usage line is `Usage: <command path> [OPTIONS]` followed, for a leaf, by each positional in order: `NAME` when required, `[NAME]` when it has a default, `NAME...` / `[NAME]...` when variadic; and for a command with subcommands by `COMMAND [ARGS]...`. `[OPTIONS]` is always present because `--help` exists.
 - The help text, when non-empty, follows after a blank line, verbatim and unwrapped.
 - Sections appear in the order `Arguments:`, `Options:`, `Commands:`, each preceded by a blank line and only when it has rows. Every row is two spaces, the left column padded to the widest left column of that section, two spaces, the right column, with trailing whitespace stripped.
-- Argument rows: left is the display name; right is the help text followed by markers. Option rows: left is `-x, --name` or `--name`, then a space and the metavar unless the option is a flag. `--version` (root only) and `--help` are the last option rows. Command rows: left is the subcommand name, right its help text.
+- Argument rows: left is the display name; right is the help text followed by markers. Option rows: left is `-x, --name` or `--name`, then a space and the metavar unless the option is a flag. `--version` (root command only) and `--help` are the last option rows. Command rows: left is the subcommand name, right its help text.
 - Markers follow the help text separated by single spaces: `[required]` when the field has no default; `[default: <text>]` when the default is not `None`, `False` or `()`, where `<text>` is the default run through the field's codec's encode side, tuple items joined by `, `.
 - The output ends with a single newline.
 
@@ -219,8 +220,8 @@ Through `E.run_main` a usage error is logged like any failure and exits with 2; 
 
 ## Testing
 
-- `test_cli.py` (Arrange-Act-Assert, handlers append the received `Args` to a list, arguments pinned through `E.Process.Test(arguments=...)`, `capsys` for output): option forms (`--name value`, `--name=value`, short), flags, positionals including optional and variadic, `--` handling, repeated scalar and tuple options, defaults and `None` optionals, every codec in the inference table, an explicit `schema=` with a refinement, nested subcommands two levels deep, `--help` at each level rendered byte-for-byte against the examples above, `--version`, every `UsageError` with its exact `str`, `InvalidArguments` accumulating several issues, every definition-time `TypeError` message, and `run_main` integration for exit codes 0, 1 and 2.
-- `test_types_cli.py`: `assert_type` pins for `Cli.command` in its three forms, `with_subcommands` producing the union of `E` and `R`, `Cli.run` returning `Effect[None, E | UsageError, R | E.Process.Protocol]`, `Args` field and `__init__` types, and negative pins (handler with the wrong argument type, assigning to a frozen field, `with_subcommands` with a non-command) inside never-called underscore functions.
+- `test_cli.py` (Arrange-Act-Assert, handlers append the received `Args` to a list, arguments pinned through `E.Process.Test(arguments=...)`, `capsys` for output): option forms (`--name value`, `--name=value`, short), flags, positionals including optional and variadic, `--` handling, repeated scalar and tuple options, defaults and `None` optionals, every codec in the inference table, an explicit `schema=` with a refinement, nested subcommands two levels deep, `--help` at each level rendered byte-for-byte against the examples above, `--version` on a root defined in the test module printing `importlib.metadata.version("effecton")` and dying with the exact `RuntimeError` for a root whose recorded module is `__main__`, every `UsageError` with its exact `str`, `InvalidArguments` accumulating several issues, every definition-time `TypeError` message, and `run_main` integration for exit codes 0, 1 and 2.
+- `test_types_cli.py`: `assert_type` pins for `Cli.command` in its three forms, `with_subcommands` producing the union of `E` and `R`, `Cli.run(app)` returning `Effect[None, E | UsageError, R | E.Process.Protocol]`, `Args` field and `__init__` types, and negative pins (handler with the wrong argument type, assigning to a frozen field, `with_subcommands` with a non-command) inside never-called underscore functions.
 - `test_process.py` covers `argv()` for `Live` (against `sys.argv`) and `Test`; `test_types_process.py` pins its type.
 - `test_schema.py` keeps passing after the struct builder refactor, and gains a case that `Annotated[int, "x"]` on an `S.Struct` field is treated as `int`.
 
