@@ -30,9 +30,26 @@ from typing import (
     overload,
 )
 
-from effecton.effect import Effect, EffectonError
+from effecton.effect import Effect, EffectonError, fail, require, sync
+from effecton.std import process
 from effecton.std import schema as S
 from effecton.std.path import Path
+
+
+def run[E: EffectonError, R](
+    command: Command[E, R],
+) -> Effect[None, E | UsageError, R | process.Protocol]:
+    """Read argv through E.Process, parse it against the command tree, run the handler.
+
+    --help prints the command's help and --version, on the root, its
+    distribution's version; both succeed. A parsing problem fails with a
+    UsageError, which exits with status 2 under run_main.
+    """
+    return (
+        require(process.Protocol)
+        .flat_map(lambda p: p.argv())
+        .flat_map(lambda argv: _dispatch(command, [command.name], list(argv), command))
+    )
 
 
 @overload
@@ -439,3 +456,107 @@ def _optional(codec: S.Schema[Any, Any]) -> S.Schema[Any, Any]:
         return None if value is None else codec._encode(value, path)
 
     return S.Schema(codec._decode, encode)
+
+
+def _dispatch(
+    command: Command[Any, Any],
+    path: list[str],
+    tokens: list[str],
+    root: Command[Any, Any],
+) -> Effect[None, Any, Any]:
+    command_path = " ".join(path)
+    usage = _usage_line(command, command_path)
+    if command._subcommands:
+        if not tokens:
+            return fail(MissingCommand(command_path, usage))
+        if tokens[0].startswith("-"):
+            return fail(UnknownOption(command_path, usage, tokens[0].partition("=")[0]))
+        sub = next((c for c in command._subcommands if c.name == tokens[0]), None)
+        if sub is None:
+            return fail(UnknownCommand(command_path, usage, tokens[0]))
+        return _dispatch(sub, [*path, sub.name], tokens[1:], root)
+
+    params = () if command._args is None else command._args.__cli_params__
+    raw = _tokenize(params, command_path, usage, tokens)
+    if isinstance(raw, EffectonError):
+        return fail(raw)
+    handler = command._handler
+    if handler is None:
+        return sync(lambda: None)  # replaced by help in Task 6
+    if command._args is None:
+        return handler()
+    return (
+        S.decode(command._args.__cli_schema__)(raw)
+        .catch(S.ParseError)(
+            lambda e: fail(InvalidArguments(command_path, usage, e.issues))
+        )
+        .flat_map(handler)
+    )
+
+
+def _tokenize(
+    params: tuple[_Param, ...], command_path: str, usage: str, tokens: list[str]
+) -> dict[str, object] | UsageError:
+    """argv tokens to the raw dict the Args schema decodes, or the first usage error."""
+    options = {p.key: p for p in params if not p.positional}
+    options |= {p.short: p for p in params if p.short is not None}
+    positionals = [p for p in params if p.positional]
+    raw: dict[str, object] = {}
+    extra: list[str] = []
+    only_positional = False
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if only_positional or token == "-" or not token.startswith("-"):
+            extra.append(token)
+            continue
+        if token == "--":
+            only_positional = True
+            continue
+        if token.startswith("--"):
+            name, eq, inline = token.partition("=")
+        else:
+            name, eq, inline = token, "", ""
+        param = options.get(name)
+        if param is None:
+            return UnknownOption(command_path, usage, name)
+        if param.flag:
+            if eq:
+                return UnexpectedOptionValue(command_path, usage, name, inline)
+            raw[param.key] = True
+            continue
+        if eq:
+            value = inline
+        elif i < len(tokens):
+            value = tokens[i]
+            i += 1
+        else:
+            return MissingOptionValue(command_path, usage, name)
+        if param.repeated:
+            raw.setdefault(param.key, [])
+            typing.cast(list[str], raw[param.key]).append(value)
+        else:
+            raw[param.key] = value
+    for param in positionals:
+        if not extra:
+            break
+        if param.repeated:
+            raw[param.key], extra = extra, []
+        else:
+            raw[param.key] = extra.pop(0)
+    if extra:
+        return UnexpectedArgument(command_path, usage, extra[0])
+    return raw
+
+
+def _usage_line(command: Command[Any, Any], command_path: str) -> str:
+    parts = [f"Usage: {command_path} [OPTIONS]"]
+    if command._subcommands:
+        parts.append("COMMAND [ARGS]...")
+    params = () if command._args is None else command._args.__cli_params__
+    for p in params:
+        if p.positional:
+            name = p.key if p.required else f"[{p.key}]"
+            parts.append(f"{name}..." if p.repeated else name)
+    return " ".join(parts)

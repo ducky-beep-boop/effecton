@@ -349,3 +349,223 @@ def test_usage_errors_render_usage_and_a_help_hint():
         "No such option '--foo'."
     )
     assert error.exit_code == 2
+
+
+def run_cli(command, *argv):
+    return E.run_sync_exit(
+        Cli.run(command).provide(E.Process.Protocol)(E.Process.Test(arguments=argv))
+    )
+
+
+def recording(received: list):
+    def handler(args=None):
+        received.append(args)
+        return E.success(None)
+
+    return handler
+
+
+def usage(command_path: str, usage_line: str, reason: str) -> str:
+    return f"{usage_line}\nTry '{command_path} --help' for help.\n\n{reason}"
+
+
+def test_runs_a_leaf_command_with_long_options():
+    received = []
+    add = Cli.command("add", args=Add, handler=recording(received))
+
+    exit = run_cli(add, "--package", "effecton", "--bump=patch", "--message", "Fix")
+
+    assert exit == E.Succeeded(None)
+    assert received == [Add(package="effecton", bump="patch", message="Fix")]
+
+
+def test_dispatches_through_nested_subcommands():
+    received = []
+    notes = Cli.command("notes", args=Notes, handler=recording(received))
+    app = Cli.command("changeset").with_subcommands(
+        Cli.command("show").with_subcommands(notes)
+    )
+
+    exit = run_cli(app, "show", "notes", "effecton")
+
+    assert exit == E.Succeeded(None)
+    assert received == [Notes(package="effecton")]
+
+
+def test_runs_a_handler_without_args():
+    received = []
+    status = Cli.command("status", handler=recording(received))
+
+    exit = run_cli(status)
+
+    assert exit == E.Succeeded(None)
+    assert received == [None]
+
+
+def test_short_flags_flags_and_repeated_options():
+    class Opts(Cli.Args):
+        tags: Annotated[tuple[int, ...], Cli.Option(short="-t")] = ()
+        name: str = "a"
+        verbose: Annotated[bool, Cli.Option(short="-v")] = False
+
+    received = []
+    cmd = Cli.command("x", args=Opts, handler=recording(received))
+
+    exit = run_cli(cmd, "-t", "1", "--tags", "2", "-v", "--name", "b", "--name", "c")
+
+    assert exit == E.Succeeded(None)
+    assert received == [Opts(tags=(1, 2), name="c", verbose=True)]
+
+
+def test_positionals_optional_and_variadic():
+    class Files(Cli.Args):
+        first: Annotated[str, Cli.Argument()]
+        second: Annotated[str, Cli.Argument()] = "none"
+        rest: Annotated[tuple[str, ...], Cli.Argument()] = ()
+
+    received = []
+    cmd = Cli.command("x", args=Files, handler=recording(received))
+
+    only_first = run_cli(cmd, "a")
+    every = run_cli(cmd, "a", "b", "c", "d")
+
+    assert (only_first, every) == (E.Succeeded(None), E.Succeeded(None))
+    assert received == [
+        Files(first="a"),
+        Files(first="a", second="b", rest=("c", "d")),
+    ]
+
+
+def test_double_dash_ends_option_parsing():
+    received = []
+    cmd = Cli.command("x", args=Notes, handler=recording(received))
+
+    exit = run_cli(cmd, "--", "--not-an-option")
+
+    assert exit == E.Succeeded(None)
+    assert received == [Notes(package="--not-an-option")]
+
+
+def test_an_option_value_may_start_with_a_dash():
+    received = []
+    cmd = Cli.command("add", args=Add, handler=recording(received))
+
+    exit = run_cli(cmd, "--package", "-x", "--bump", "patch", "--message", "m")
+
+    assert received == [Add(package="-x", bump="patch", message="m")]
+    assert exit == E.Succeeded(None)
+
+
+def test_a_handler_failure_is_the_effects_failure():
+    @dataclasses.dataclass(frozen=True)
+    class Boom(E.EffectonError):
+        pass
+
+    cmd = Cli.command("x", handler=lambda: E.fail(Boom()))
+
+    exit = run_cli(cmd)
+
+    assert exit == E.Failure(E.Fail(Boom()))
+
+
+ADD_USAGE = "Usage: changeset add [OPTIONS]"
+ROOT_USAGE = "Usage: changeset [OPTIONS] COMMAND [ARGS]..."
+
+
+def changeset_app(received):
+    add = Cli.command("add", args=Add, handler=recording(received))
+    notes = Cli.command("notes", args=Notes, handler=recording(received))
+    return Cli.command("changeset").with_subcommands(add, notes)
+
+
+@pytest.mark.parametrize(
+    ("argv", "error"),
+    [
+        ((), Cli.MissingCommand("changeset", ROOT_USAGE)),
+        (("--bogus",), Cli.UnknownOption("changeset", ROOT_USAGE, "--bogus")),
+        (("--bogus=1",), Cli.UnknownOption("changeset", ROOT_USAGE, "--bogus")),
+        (("remove",), Cli.UnknownCommand("changeset", ROOT_USAGE, "remove")),
+        (("add", "--foo", "1"), Cli.UnknownOption("changeset add", ADD_USAGE, "--foo")),
+        (("add", "-xvalue"), Cli.UnknownOption("changeset add", ADD_USAGE, "-xvalue")),
+        (("add", "-1"), Cli.UnknownOption("changeset add", ADD_USAGE, "-1")),
+        (
+            ("add", "--package"),
+            Cli.MissingOptionValue("changeset add", ADD_USAGE, "--package"),
+        ),
+        (
+            ("add", "--dry-run=yes"),
+            Cli.UnexpectedOptionValue("changeset add", ADD_USAGE, "--dry-run", "yes"),
+        ),
+        (
+            ("notes", "effecton", "extra"),
+            Cli.UnexpectedArgument(
+                "changeset notes", "Usage: changeset notes [OPTIONS] PACKAGE", "extra"
+            ),
+        ),
+    ],
+)
+def test_usage_errors(argv, error):
+    exit = run_cli(changeset_app([]), *argv)
+
+    assert exit == E.Failure(E.Fail(error))
+
+
+def test_invalid_arguments_reports_every_issue():
+    exit = run_cli(changeset_app([]), "add", "--bump", "big", "--message", " ")
+
+    assert exit == E.Failure(
+        E.Fail(
+            Cli.InvalidArguments(
+                "changeset add",
+                ADD_USAGE,
+                (
+                    S.MissingKey(("--package",)),
+                    S.TypeMismatch(("--bump",), "'major' | 'minor' | 'patch'", "big"),
+                    S.RefinementFailed(
+                        ("--message",), "expected a non-empty message", " "
+                    ),
+                ),
+            )
+        )
+    )
+
+
+def test_invalid_arguments_renders_missing_and_invalid_lines():
+    error = Cli.InvalidArguments(
+        "changeset add",
+        ADD_USAGE,
+        (
+            S.MissingKey(("--package",)),
+            S.MissingKey(("PACKAGE",)),
+            S.TypeMismatch(("--bump",), "'major' | 'minor' | 'patch'", "big"),
+            S.TransformFailed(("--tags", 1), "expected an integer string", "x"),
+        ),
+    )
+
+    assert str(error) == usage(
+        "changeset add",
+        ADD_USAGE,
+        "Missing option '--package'.\n"
+        "Missing argument 'PACKAGE'.\n"
+        "Invalid value for '--bump': expected 'major' | 'minor' | 'patch', got 'big'\n"
+        "Invalid value for '--tags': [1]: expected an integer string, got 'x'",
+    )
+
+
+def test_usage_line_lists_positionals():
+    class Files(Cli.Args):
+        first: Annotated[str, Cli.Argument()]
+        second: Annotated[str, Cli.Argument()] = "none"
+        rest: Annotated[tuple[str, ...], Cli.Argument()] = ()
+
+    cmd = Cli.command("cp", args=Files, handler=lambda a: E.success(None))
+
+    exit = run_cli(cmd, "--nope")
+
+    assert exit == E.Failure(
+        E.Fail(
+            Cli.UnknownOption(
+                "cp", "Usage: cp [OPTIONS] FIRST [SECOND] [REST]...", "--nope"
+            )
+        )
+    )

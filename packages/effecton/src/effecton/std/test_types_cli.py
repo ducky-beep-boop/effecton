@@ -63,24 +63,23 @@ def _with_subcommands_unions_errors_and_requirements() -> None:
     )
 
 
-# Task 5 uncomments this pin once Cli.run exists.
-# def _run_adds_usage_errors_and_the_process_requirement() -> None:
-#     add = Cli.command("add", args=Add, handler=run_add)
-#     app = Cli.command("app").with_subcommands(add)
-#     assert_type(
-#         Cli.run(app),
-#         E.Effect[
-#             None,
-#             AddFailed | Cli.UsageError,
-#             E.FileSystem.Protocol | E.Process.Protocol,
-#         ],
-#     )
-#     runnable = (
-#         Cli.run(app)
-#         .provide(E.FileSystem.Protocol)(E.FileSystem.Test())
-#         .provide(E.Process.Protocol)(E.Process.Test())
-#     )
-#     assert_type(runnable, E.Effect[None, AddFailed | Cli.UsageError])
+def _run_adds_usage_errors_and_the_process_requirement() -> None:
+    add = Cli.command("add", args=Add, handler=run_add)
+    app = Cli.command("app").with_subcommands(add)
+    assert_type(
+        Cli.run(app),
+        E.Effect[
+            None,
+            AddFailed | Cli.UsageError,
+            E.FileSystem.Protocol | E.Process.Protocol,
+        ],
+    )
+    runnable = (
+        Cli.run(app)
+        .provide(E.FileSystem.Protocol)(E.FileSystem.Test())
+        .provide(E.Process.Protocol)(E.Process.Test())
+    )
+    assert_type(runnable, E.Effect[None, AddFailed | Cli.UsageError])
 
 
 def _cli_negative() -> None:
