@@ -56,14 +56,12 @@ source = { editable = "packages/api-reference" }
 dependencies = [
     { name = "effecton" },
     { name = "griffe" },
-    { name = "typer" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "effecton", editable = "packages/effecton" },
     { name = "griffe", specifier = ">=2.3" },
-    { name = "typer", specifier = ">=0.15" },
 ]
 
 [[package]]
