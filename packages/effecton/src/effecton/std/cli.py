@@ -335,6 +335,8 @@ def _plan_params(cls: type[Any]) -> tuple[_Param, ...]:
             key = "--" + f.name.replace("_", "-") if spec.name is None else spec.name
             if not key.startswith("--"):
                 raise TypeError(f"{where}: Option name {key!r} must start with '--'")
+            if key in ("--help", "--version"):
+                raise TypeError(f"{where}: the option name {key!r} is reserved")
             if short is not None and not (
                 len(short) == 2 and short[0] == "-" and short[1] != "-"
             ):
@@ -365,6 +367,8 @@ def _plan_params(cls: type[Any]) -> tuple[_Param, ...]:
                 raise TypeError(f"{where}: a flag's default must be False")
             if spec.metavar is not None:
                 raise TypeError(f"{where}: a flag takes no metavar")
+            if spec.schema is not None:
+                raise TypeError(f"{where}: a flag takes no schema")
             codec, metavar = S.Bool, None
         else:
             if optional:

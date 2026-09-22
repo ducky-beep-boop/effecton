@@ -36,7 +36,7 @@ TOPICS: tuple[Topic, ...] = (
     Topic("Logging", ("std.logger", "std.pretty_logger")),
     Topic("Path", ("std.path",)),
     Topic("Schema", ("std.schema",)),
-    Topic("Cli", ("std.cli",), extras=("std.cli.Command",)),
+    Topic("Cli", ("std.cli",)),
     Topic("Clock", ("std.clock",)),
     Topic("Random", ("std.random",)),
     Topic("FileSystem", ("std.file_system",)),

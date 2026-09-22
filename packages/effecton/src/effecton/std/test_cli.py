@@ -223,6 +223,35 @@ def test_explicit_names_override_the_defaults():
             lambda: type(
                 "Bad",
                 (Cli.Args,),
+                {
+                    "__annotations__": {
+                        "verbose": Annotated[bool, Cli.Option(schema=S.String)]
+                    },
+                    "verbose": False,
+                },
+            ),
+            "Bad.verbose: a flag takes no schema",
+        ),
+        (
+            lambda: type("Bad", (Cli.Args,), {"__annotations__": {"help": str}}),
+            "Bad.help: the option name '--help' is reserved",
+        ),
+        (
+            lambda: type(
+                "Bad",
+                (Cli.Args,),
+                {
+                    "__annotations__": {
+                        "v": Annotated[str, Cli.Option(name="--version")]
+                    }
+                },
+            ),
+            "Bad.v: the option name '--version' is reserved",
+        ),
+        (
+            lambda: type(
+                "Bad",
+                (Cli.Args,),
                 {"__annotations__": {"target": Annotated[str, Cli.Argument(name="")]}},
             ),
             "Bad.target: Argument name must not be empty",

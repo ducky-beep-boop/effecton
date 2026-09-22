@@ -15,13 +15,13 @@ Environment variable fallback, shell completion, grouped short flags (`-vq`), `-
 
 ## Placement
 
-`packages/effecton/src/effecton/std/cli.py`, exported from `effecton/__init__.py` as `E.Cli` (`from effecton.std import cli as Cli`). Consumers alias it: `Cli = E.Cli`. The module is added to `api_reference`'s `topics.TOPICS` as `Topic("Cli", ("std.cli",), extras=("std.cli.Command",))`. Tests are collocated: `std/test_cli.py` and `std/test_types_cli.py`. A patch changeset accompanies the change, a docs page `docs/src/pages/std/cli.md` follows the existing std pages and joins the sidebar after Schema, and the effecton agent skill gains a CLI section. `packages/changesets`, `packages/api-reference` and `packages/examples/skills-cli` are ported in the same change and `typer` leaves the workspace.
+`packages/effecton/src/effecton/std/cli.py`, exported from `effecton/__init__.py` as `E.Cli` (`from effecton.std import cli as Cli`). Consumers alias it: `Cli = E.Cli`. The module is added to `api_reference`'s `topics.TOPICS` as `Topic("Cli", ("std.cli",))` with no `extras`, because `Command` is a public member of the module and already renders as `E.Cli.Command`. Tests are collocated: `std/test_cli.py` and `std/test_types_cli.py`. A patch changeset accompanies the change, a docs page `docs/src/pages/std/cli.md` follows the existing std pages and joins the sidebar after Schema, and the effecton agent skill gains a CLI section. `packages/changesets`, `packages/api-reference` and `packages/examples/skills-cli` are ported in the same change and `typer` leaves the workspace.
 
 ## Architecture
 
 Three layers, each a pure function over the previous one:
 
-1. **Declaration.** `Cli.Args.__init_subclass__` turns the class into a frozen keyword-only dataclass and builds a `Schema[Args, dict[str, object]]` through the schema module's struct builder, which is generalized to take a per-field resolver `(field, hint, where) -> (wire key, schema)`, `where` being the dotted `Class.field` name for error messages. `S.Struct` passes its own resolver (`S.field` metadata plus JSON inference); `Cli.Args` passes one that reads `Cli.Option` / `Cli.Argument` from `Annotated` metadata and infers a text codec (`Schema[T, str]`) from the annotation. The wire key of a field is its display name (`--package` or `PACKAGE`), so issue paths already read as option names. Type hints are read with `include_extras=True` in both cases and `Annotated` is unwrapped for `S.Struct`. Default values are validated against the field's schema at class definition exactly as for structs.
+1. **Declaration.** `Cli.Args.__init_subclass__` turns the class into a frozen keyword-only dataclass and builds a `Schema[Args, dict[str, object]]` through the schema module's struct builder, which is generalized to take a per-field resolver `(field, hint, where) -> (wire key, schema)`, `where` being the dotted `Class.field` name for error messages. `S.Struct` passes its own resolver (`S.field` metadata plus JSON inference); `Cli.Args` passes one that reads `Cli.Option` / `Cli.Argument` from `Annotated` metadata and infers a text codec (`Schema[T, str]`) from the annotation. The wire key of a field is its display name (`--package` or `PACKAGE`), so issue paths already read as option names. Type hints are read with `include_extras=True` in both cases and `Annotated` is unwrapped for `S.Struct`. Default values are validated against the field's schema at class definition exactly as for structs. `__init_subclass__` stores the struct schema on `__cli_schema__` and the parameter table on `__cli_params__`: a tuple, in declaration order, of one frozen record per field with `field` (attribute name), `key` (display name and wire key), `short`, `help`, `metavar` (`None` for a flag), `codec`, `positional`, `flag`, `repeated`, `required` (no default) and `default_text` (the text after `[default: ` in help, or `None`). Tests read both directly.
 2. **Tokenizing.** `argv` tokens are matched against the command tree and, for the leaf command, against its option and argument table, producing a raw `dict[str, object]` keyed by display name: `str` for a valued option or positional, `True` for a flag, `list[str]` for a repeated field. Keys not given are absent, so struct defaults apply. This step knows nothing about types beyond "flag or value".
 3. **Decoding and running.** `S.decode(schema)(raw)` produces the `Args` instance or a `ParseError`, which becomes `InvalidArguments`. The handler runs with the instance.
 
@@ -63,10 +63,12 @@ class Notes(Cli.Args):
     package: Annotated[str, Cli.Argument(help="Package to print notes for.")]
 ```
 
+The `dry_run` field is illustrative: the ported changesets `add` command has no dry-run mode.
+
 - `Cli.Args` is marked `@dataclass_transform(frozen_default=True, kw_only_default=True)` and has no field specifier: defaults are plain values. Instances are constructed directly in tests (`Add(package="effecton", bump="patch", message="…")`).
 - A field is an **option** unless its metadata is `Cli.Argument`, in which case it is a **positional argument**. A field without metadata is an option with no help text. A `tuple[T, ...]` field without a default requires at least one occurrence; with `= ()` it is optional.
 - `Cli.Option(*, help="", name=None, short=None, metavar=None, schema=None)` and `Cli.Argument(*, help="", name=None, metavar=None, schema=None)` are `@final` frozen dataclasses. `name` overrides the display name and must start with `--` (options) or be non-empty (arguments); `short` must be `-` followed by one character; `metavar` overrides the placeholder in help; `schema` is a `Schema[Any, str]` that replaces inference. ty cannot check `Annotated` metadata against the annotation, so a `schema` whose decoded type disagrees with the annotation is not a static error; the encoded type must be `str` and is likewise unchecked.
-- The default display name is `--` plus the field name with `_` replaced by `-` for options, and the field name upper-cased for arguments (`skill_url` becomes `SKILL_URL`).
+- The default display name is `--` plus the field name with `_` replaced by `-` for options, and the field name upper-cased for arguments (`skill_url` becomes `SKILL_URL`). `--help` and `--version` are reserved: a field whose display name is either (a field named `help`, or `name="--version"`) is a definition-time error, so the built-in rows never collide with a user option.
 
 ### Text inference
 
@@ -81,7 +83,7 @@ The codec is inferred from the annotation (after unwrapping `Annotated`); `schem
 | `datetime` | `S.DateTimeFromString` | `DATETIME` |
 | `date` | `S.DateFromString` | `DATE` |
 | `Literal[...]` of `str` values | `S.Literal(...)` | `[a\|b\|c]` |
-| `bool` | flag: `S.Bool`; present is `True` | none |
+| `bool` | flag: `S.Bool`; present is `True`; `schema=` is a definition-time error | none |
 | `T \| None` | the codec of `T` on decode (the wire never carries `None`), and `None` encodes to `None`; the default must be `None` | metavar of `T` |
 | `tuple[T, ...]` | `S.Array(codec of T)`; every occurrence is collected | metavar of `T` |
 | explicit `schema=` | as given | metavar of the annotation when it is a table entry above, else `VALUE`; `metavar=` overrides either |
@@ -90,9 +92,10 @@ An explicit `schema=` still runs the annotation through the table for its metava
 
 Definition-time `TypeError`s, with exact messages:
 
-- `Add.amount: no text codec can be inferred for <class 'decimal.Decimal'>; pass one with Cli.Option(schema=...)` for any other annotation, including a `Literal` with a non-`str` value, `bool | None`, `tuple[bool, ...]` and nested tuples.
+- `Add.amount: no text codec can be inferred for <class 'decimal.Decimal'>; pass one with Cli.Option(schema=...)` for any other annotation, including a `Literal` with a non-`str` value, `bool | None`, `tuple[bool, ...]` and nested tuples. The message names the innermost annotation the table rejected, in its `repr`: `bool | None` and `tuple[bool, ...]` both report `<class 'bool'>`, and `Literal[1, 2]` reports `typing.Literal[1, 2]`.
 - `Add.dry_run: a flag's default must be False` when a `bool` field has no default or a default other than `False`.
-- `Bad.verbose: a flag takes no metavar` when a `bool` field is given `Cli.Option(metavar=...)`.
+- `Bad.verbose: a flag takes no metavar` when a `bool` field is given `Cli.Option(metavar=...)`, and `Bad.verbose: a flag takes no schema` for `Cli.Option(schema=...)`.
+- `Bad.help: the option name '--help' is reserved` (likewise `'--version'`) when a field's display name, default or explicit, is a built-in option.
 - `Add.port: an optional field's default must be None` when a `T | None` field has no default or a default other than `None`.
 - `Notes.name: Argument name must not be empty` when `Cli.Argument(name="")` is given.
 - `Notes: argument 'rest' cannot follow the variadic argument 'files'` when a positional comes after a `tuple[T, ...]` positional.
@@ -101,6 +104,8 @@ Definition-time `TypeError`s, with exact messages:
 - `Add.package: the default '' does not satisfy its schema: expected a non-empty message, got ''` (the struct builder's message, unchanged).
 - `Add.verbose: Cli.Argument cannot be a flag` for a `bool` positional.
 - `Add.bump: Option name '-b' must start with '--'` / `Add.bump: short flag 'b' must be '-' followed by one character`.
+
+Checks run in this order, so the first failing one is the message raised. Fields are visited in declaration order; for each: the display name (`Argument name must not be empty`, `Option name ... must start with '--'`, then the reserved names), the short flag's shape, the wire-key collisions (long name first, then short), then the shape: for a `bool`, `Cli.Argument cannot be a flag`, the `False` default, the metavar, the schema; for anything else, codec inference (`no text codec ...`), then the optional field's `None` default. After every field, the positional order (`cannot follow the variadic argument`, then `cannot follow the optional argument`). Last, the struct builder validates each default against its codec (`does not satisfy its schema`).
 
 ## Commands
 
@@ -129,7 +134,7 @@ def run() -> None:
 
 Walk the command tree from the root with the remaining tokens:
 
-1. **A command with subcommands.** If the first token is `--help`, print this command's help and succeed. If this is the root and the first token is `--version`, print `<name> <version>` and succeed. No tokens: `MissingCommand`. A token starting with `-`: `UnknownOption`. Otherwise look the token up among the subcommands (`UnknownCommand` if absent) and recurse with the rest.
+1. **A command with subcommands.** If the first token is `--help`, print this command's help and succeed. If this is the root and the first token is `--version`, print `<name> <version>` and succeed. No tokens: `MissingCommand`. A token starting with `-`, including a lone `-`: `UnknownOption` with the token (cut at its first `=`). Otherwise look the token up among the subcommands (`UnknownCommand` if absent) and recurse with the rest.
 2. **A leaf command** checks, in this order, before it tokenizes anything:
    - Split the tokens on the first `--`, if any, into a before-separator slice and the rest. If `--help` appears anywhere in the before-separator slice, print the leaf's help and succeed, whatever else the tokens contain.
    - If the leaf is also the root command and `--version` appears anywhere in the before-separator slice, print `<name> <version>` and succeed.
