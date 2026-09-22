@@ -46,10 +46,10 @@ def test_missing_url_is_a_usage_error():
 
     assert exit == E.Failure(
         E.Fail(
-            E.Cli.InvalidArguments(
+            E.Cli.UsageError(
                 "skills-cli",
                 "Usage: skills-cli [OPTIONS] SKILL_URL",
-                (E.Schema.MissingKey(("SKILL_URL",)),),
+                E.Cli.InvalidArguments((E.Schema.MissingKey(("SKILL_URL",)),)),
             )
         )
     )

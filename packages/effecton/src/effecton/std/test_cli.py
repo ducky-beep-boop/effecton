@@ -360,8 +360,10 @@ def test_with_subcommands_rejects_duplicate_names():
 
 
 def test_usage_errors_render_usage_and_a_help_hint():
-    error = Cli.UnknownOption(
-        "changeset add", "Usage: changeset add [OPTIONS]", "--foo"
+    error = Cli.UsageError(
+        "changeset add",
+        "Usage: changeset add [OPTIONS]",
+        Cli.UnknownOption("--foo"),
     )
 
     assert str(error) == (
@@ -503,25 +505,51 @@ def changeset_app(received):
 @pytest.mark.parametrize(
     ("argv", "error"),
     [
-        ((), Cli.MissingCommand("changeset", ROOT_USAGE)),
-        (("--bogus",), Cli.UnknownOption("changeset", ROOT_USAGE, "--bogus")),
-        (("--bogus=1",), Cli.UnknownOption("changeset", ROOT_USAGE, "--bogus")),
-        (("remove",), Cli.UnknownCommand("changeset", ROOT_USAGE, "remove")),
-        (("add", "--foo", "1"), Cli.UnknownOption("changeset add", ADD_USAGE, "--foo")),
-        (("add", "-xvalue"), Cli.UnknownOption("changeset add", ADD_USAGE, "-xvalue")),
-        (("add", "-1"), Cli.UnknownOption("changeset add", ADD_USAGE, "-1")),
+        ((), Cli.UsageError("changeset", ROOT_USAGE, Cli.MissingCommand())),
+        (
+            ("--bogus",),
+            Cli.UsageError("changeset", ROOT_USAGE, Cli.UnknownOption("--bogus")),
+        ),
+        (
+            ("--bogus=1",),
+            Cli.UsageError("changeset", ROOT_USAGE, Cli.UnknownOption("--bogus")),
+        ),
+        (
+            ("remove",),
+            Cli.UsageError("changeset", ROOT_USAGE, Cli.UnknownCommand("remove")),
+        ),
+        (
+            ("add", "--foo", "1"),
+            Cli.UsageError("changeset add", ADD_USAGE, Cli.UnknownOption("--foo")),
+        ),
+        (
+            ("add", "-xvalue"),
+            Cli.UsageError("changeset add", ADD_USAGE, Cli.UnknownOption("-xvalue")),
+        ),
+        (
+            ("add", "-1"),
+            Cli.UsageError("changeset add", ADD_USAGE, Cli.UnknownOption("-1")),
+        ),
         (
             ("add", "--package"),
-            Cli.MissingOptionValue("changeset add", ADD_USAGE, "--package"),
+            Cli.UsageError(
+                "changeset add", ADD_USAGE, Cli.MissingOptionValue("--package")
+            ),
         ),
         (
             ("add", "--dry-run=yes"),
-            Cli.UnexpectedOptionValue("changeset add", ADD_USAGE, "--dry-run", "yes"),
+            Cli.UsageError(
+                "changeset add",
+                ADD_USAGE,
+                Cli.UnexpectedOptionValue("--dry-run", "yes"),
+            ),
         ),
         (
             ("notes", "effecton", "extra"),
-            Cli.UnexpectedArgument(
-                "changeset notes", "Usage: changeset notes [OPTIONS] PACKAGE", "extra"
+            Cli.UsageError(
+                "changeset notes",
+                "Usage: changeset notes [OPTIONS] PACKAGE",
+                Cli.UnexpectedArgument("extra"),
             ),
         ),
     ],
@@ -532,20 +560,41 @@ def test_usage_errors(argv, error):
     assert exit == E.Failure(E.Fail(error))
 
 
+def test_catch_usage_error_covers_every_reason():
+    program = Cli.run(changeset_app([])).catch(Cli.UsageError)(
+        lambda e: E.success(e.reason)
+    )
+
+    reason = E.run_sync(
+        program.provide(E.Process.Protocol)(E.Process.Test(arguments=("remove",)))
+    )
+
+    assert isinstance(reason, Cli.UnknownCommand)
+    match reason:
+        case Cli.UnknownCommand(name=name):
+            assert name == "remove"
+        case _:
+            pytest.fail("expected Cli.UnknownCommand")
+
+
 def test_invalid_arguments_reports_every_issue():
     exit = run_cli(changeset_app([]), "add", "--bump", "big", "--message", " ")
 
     assert exit == E.Failure(
         E.Fail(
-            Cli.InvalidArguments(
+            Cli.UsageError(
                 "changeset add",
                 ADD_USAGE,
-                (
-                    S.MissingKey(("--package",)),
-                    S.TypeMismatch(("--bump",), "'major' | 'minor' | 'patch'", "big"),
-                    S.RefinementFailed(
-                        ("--message",), "expected a non-empty message", " "
-                    ),
+                Cli.InvalidArguments(
+                    (
+                        S.MissingKey(("--package",)),
+                        S.TypeMismatch(
+                            ("--bump",), "'major' | 'minor' | 'patch'", "big"
+                        ),
+                        S.RefinementFailed(
+                            ("--message",), "expected a non-empty message", " "
+                        ),
+                    )
                 ),
             )
         )
@@ -553,14 +602,16 @@ def test_invalid_arguments_reports_every_issue():
 
 
 def test_invalid_arguments_renders_missing_and_invalid_lines():
-    error = Cli.InvalidArguments(
+    error = Cli.UsageError(
         "changeset add",
         ADD_USAGE,
-        (
-            S.MissingKey(("--package",)),
-            S.MissingKey(("PACKAGE",)),
-            S.TypeMismatch(("--bump",), "'major' | 'minor' | 'patch'", "big"),
-            S.TransformFailed(("--tags", 1), "expected an integer string", "x"),
+        Cli.InvalidArguments(
+            (
+                S.MissingKey(("--package",)),
+                S.MissingKey(("PACKAGE",)),
+                S.TypeMismatch(("--bump",), "'major' | 'minor' | 'patch'", "big"),
+                S.TransformFailed(("--tags", 1), "expected an integer string", "x"),
+            )
         ),
     )
 
@@ -586,8 +637,10 @@ def test_usage_line_lists_positionals():
 
     assert exit == E.Failure(
         E.Fail(
-            Cli.UnknownOption(
-                "cp", "Usage: cp [OPTIONS] FIRST [SECOND] [REST]...", "--nope"
+            Cli.UsageError(
+                "cp",
+                "Usage: cp [OPTIONS] FIRST [SECOND] [REST]...",
+                Cli.UnknownOption("--nope"),
             )
         )
     )
@@ -735,7 +788,9 @@ def test_version_on_a_subcommand_is_an_unknown_option():
     exit = run_cli(documented_app(), "add", "--version")
 
     assert exit == E.Failure(
-        E.Fail(Cli.UnknownOption("changeset add", ADD_USAGE, "--version"))
+        E.Fail(
+            Cli.UsageError("changeset add", ADD_USAGE, Cli.UnknownOption("--version"))
+        )
     )
 
 

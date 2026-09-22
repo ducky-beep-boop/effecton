@@ -166,7 +166,7 @@ class Test(Protocol):
 
 - **Use `E.Cli`, not typer or click.** Arguments are a `Cli.Args` class with `Annotated[T, Cli.Option(help=...)]` / `Cli.Argument(...)` fields; `str`, `int`, `float`, `E.Path`, `datetime`, `date` and `Literal[...]` of strings infer their text codec, `bool` is a flag, `T | None` is optional, `tuple[T, ...]` repeats, and any `S.Schema[T, str]` goes in `schema=`.
 - A command is `Cli.command(name, args=Args, handler=run_it, help=...)`, where the handler returns `E.Effect[None, E, R]`; parents are `Cli.command(name, help=...).with_subcommands(...)`. `Cli.run(app)` is one effect requiring `E.Process`; wire the `Live` services at the root and hand it to `E.run_main`. Output is `E.sync(lambda: print(...))` inside the handler.
-- Parsing failures are `Cli.UsageError`s with exit code 2; `--help` and `--version` succeed. Test a CLI with `E.Process.Test(arguments=(...))`, `Test` services and `E.run_sync_exit`; never a `CliRunner` or monkeypatching.
+- Parsing failures are one `Cli.UsageError` (exit code 2) carrying a `reason` — `UnknownOption`, `MissingCommand`, `InvalidArguments`, and the like — so `effect.catch(Cli.UsageError)(handler)` catches every parsing failure at once; `--help` and `--version` succeed. Test a CLI with `E.Process.Test(arguments=(...))`, `Test` services and `E.run_sync_exit`; never a `CliRunner` or monkeypatching.
 
 ## Running effects
 

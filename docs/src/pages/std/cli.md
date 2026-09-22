@@ -90,7 +90,7 @@ def run() -> None:
 
 ## Usage errors
 
-Parsing fails with one of `Cli.UnknownOption`, `UnknownCommand`, `MissingCommand`, `MissingOptionValue`, `UnexpectedOptionValue`, `UnexpectedArgument` or `InvalidArguments`, together `Cli.UsageError`. Each renders the usage line, a `Try 'changeset add --help' for help.` hint and the reason, and carries `exit_code = 2`. `InvalidArguments` holds every schema issue at once:
+Parsing fails with `Cli.UsageError`, one error class for every parsing problem, so `effect.catch(Cli.UsageError)(handler)` catches them all. It carries `exit_code = 2` and a `reason` naming what went wrong: `UnknownOption`, `UnknownCommand`, `MissingCommand`, `MissingOptionValue`, `UnexpectedOptionValue`, `UnexpectedArgument` or `InvalidArguments`. `__str__` renders the usage line, a `Try 'changeset add --help' for help.` hint and the reason. `InvalidArguments` holds every schema issue at once:
 
 ```
 Usage: changeset add [OPTIONS]

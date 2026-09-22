@@ -25,8 +25,10 @@ def test_unknown_option_is_a_usage_error():
 
     assert exit == E.Failure(
         E.Fail(
-            E.Cli.UnknownOption(
-                "api-reference", "Usage: api-reference [OPTIONS]", "--nope"
+            E.Cli.UsageError(
+                "api-reference",
+                "Usage: api-reference [OPTIONS]",
+                E.Cli.UnknownOption("--nope"),
             )
         )
     )

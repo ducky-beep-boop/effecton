@@ -82,6 +82,16 @@ def _run_adds_usage_errors_and_the_process_requirement() -> None:
     assert_type(runnable, E.Effect[None, AddFailed | Cli.UsageError])
 
 
+def _catching_usage_error_subtracts_it() -> None:
+    add = Cli.command("add", args=Add, handler=run_add)
+    app = Cli.command("app").with_subcommands(add)
+    caught = Cli.run(app).catch(Cli.UsageError)(lambda e: E.success(None))
+    assert_type(
+        caught,
+        E.Effect[None, AddFailed, E.FileSystem.Protocol | E.Process.Protocol],
+    )
+
+
 def _cli_negative() -> None:
     # A handler must accept the declared Args class.
     def wrong(args: int) -> E.Effect[None]:

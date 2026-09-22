@@ -176,97 +176,22 @@ class Args:
 
 @final
 @dataclass(frozen=True)
-class UnknownOption(EffectonError):
-    command: str
-    usage: str
-    option: str
+class UsageError(EffectonError):
+    """The command line could not be parsed; reason says why.
+
+    Exits with 2 under run_main.
+    """
+
+    command: str  # the command path, "changeset add"
+    usage: str  # that command's usage line
+    reason: UsageReason
     exit_code: ClassVar[int] = 2
 
     def __str__(self) -> str:
-        return _usage_error(self, f"No such option '{self.option}'.")
+        return f"{self.usage}\nTry '{self.command} --help' for help.\n\n{self.reason}"
 
 
-@final
-@dataclass(frozen=True)
-class UnknownCommand(EffectonError):
-    command: str
-    usage: str
-    name: str
-    exit_code: ClassVar[int] = 2
-
-    def __str__(self) -> str:
-        return _usage_error(self, f"No such command '{self.name}'.")
-
-
-@final
-@dataclass(frozen=True)
-class MissingCommand(EffectonError):
-    command: str
-    usage: str
-    exit_code: ClassVar[int] = 2
-
-    def __str__(self) -> str:
-        return _usage_error(self, "Missing command.")
-
-
-@final
-@dataclass(frozen=True)
-class MissingOptionValue(EffectonError):
-    command: str
-    usage: str
-    option: str
-    exit_code: ClassVar[int] = 2
-
-    def __str__(self) -> str:
-        return _usage_error(self, f"Option '{self.option}' requires a value.")
-
-
-@final
-@dataclass(frozen=True)
-class UnexpectedOptionValue(EffectonError):
-    command: str
-    usage: str
-    option: str
-    value: str
-    exit_code: ClassVar[int] = 2
-
-    def __str__(self) -> str:
-        return _usage_error(self, f"Option '{self.option}' does not take a value.")
-
-
-@final
-@dataclass(frozen=True)
-class UnexpectedArgument(EffectonError):
-    command: str
-    usage: str
-    argument: str
-    exit_code: ClassVar[int] = 2
-
-    def __str__(self) -> str:
-        return _usage_error(self, f"Got unexpected extra argument '{self.argument}'.")
-
-
-@final
-@dataclass(frozen=True)
-class InvalidArguments(EffectonError):
-    command: str
-    usage: str
-    issues: tuple[S.Issue, ...]
-    exit_code: ClassVar[int] = 2
-
-    def __str__(self) -> str:
-        def describe(issue: S.Issue) -> str:
-            head, *rest = issue.path
-            if isinstance(issue, S.MissingKey):
-                kind = "option" if str(head).startswith("--") else "argument"
-                return f"Missing {kind} '{head}'."
-            body = str(dataclasses.replace(issue, path=tuple(rest)))
-            return f"Invalid value for '{head}': {body}"
-
-        return _usage_error(self, "\n".join(describe(issue) for issue in self.issues))
-
-
-type UsageError = (
+type UsageReason = (
     UnknownOption
     | UnknownCommand
     | MissingCommand
@@ -277,8 +202,74 @@ type UsageError = (
 )
 
 
-def _usage_error(error: Any, reason: str) -> str:
-    return f"{error.usage}\nTry '{error.command} --help' for help.\n\n{reason}"
+@final
+@dataclass(frozen=True)
+class UnknownOption:
+    option: str
+
+    def __str__(self) -> str:
+        return f"No such option '{self.option}'."
+
+
+@final
+@dataclass(frozen=True)
+class UnknownCommand:
+    name: str
+
+    def __str__(self) -> str:
+        return f"No such command '{self.name}'."
+
+
+@final
+@dataclass(frozen=True)
+class MissingCommand:
+    def __str__(self) -> str:
+        return "Missing command."
+
+
+@final
+@dataclass(frozen=True)
+class MissingOptionValue:
+    option: str
+
+    def __str__(self) -> str:
+        return f"Option '{self.option}' requires a value."
+
+
+@final
+@dataclass(frozen=True)
+class UnexpectedOptionValue:
+    option: str
+    value: str
+
+    def __str__(self) -> str:
+        return f"Option '{self.option}' does not take a value."
+
+
+@final
+@dataclass(frozen=True)
+class UnexpectedArgument:
+    argument: str
+
+    def __str__(self) -> str:
+        return f"Got unexpected extra argument '{self.argument}'."
+
+
+@final
+@dataclass(frozen=True)
+class InvalidArguments:
+    issues: tuple[S.Issue, ...]
+
+    def __str__(self) -> str:
+        def describe(issue: S.Issue) -> str:
+            head, *rest = issue.path
+            if isinstance(issue, S.MissingKey):
+                kind = "option" if str(head).startswith("--") else "argument"
+                return f"Missing {kind} '{head}'."
+            body = str(dataclasses.replace(issue, path=tuple(rest)))
+            return f"Invalid value for '{head}': {body}"
+
+        return "\n".join(describe(issue) for issue in self.issues)
 
 
 @dataclass(frozen=True)
@@ -480,12 +471,16 @@ def _dispatch(
         if is_root and tokens and tokens[0] == "--version":
             return _print_version(root)
         if not tokens:
-            return fail(MissingCommand(command_path, usage))
+            return fail(UsageError(command_path, usage, MissingCommand()))
         if tokens[0].startswith("-"):
-            return fail(UnknownOption(command_path, usage, tokens[0].partition("=")[0]))
+            return fail(
+                UsageError(
+                    command_path, usage, UnknownOption(tokens[0].partition("=")[0])
+                )
+            )
         sub = next((c for c in command._subcommands if c.name == tokens[0]), None)
         if sub is None:
-            return fail(UnknownCommand(command_path, usage, tokens[0]))
+            return fail(UsageError(command_path, usage, UnknownCommand(tokens[0])))
         return _dispatch(sub, [*path, sub.name], tokens[1:], root)
 
     before_separator = tokens[: tokens.index("--")] if "--" in tokens else tokens
@@ -497,25 +492,26 @@ def _dispatch(
         return _print(_help(command, command_path, is_root))
 
     params = () if command._args is None else command._args.__cli_params__
-    raw = _tokenize(params, command_path, usage, tokens)
-    if isinstance(raw, EffectonError):
-        return fail(raw)
+    raw = _tokenize(params, tokens)
+    if not isinstance(raw, dict):
+        return fail(UsageError(command_path, usage, raw))
     handler = command._handler
     if command._args is None:
         return handler()
     return (
         S.decode(command._args.__cli_schema__)(raw)
         .catch(S.ParseError)(
-            lambda e: fail(InvalidArguments(command_path, usage, e.issues))
+            lambda e: fail(UsageError(command_path, usage, InvalidArguments(e.issues)))
         )
         .flat_map(handler)
     )
 
 
 def _tokenize(
-    params: tuple[_Param, ...], command_path: str, usage: str, tokens: list[str]
-) -> dict[str, object] | UsageError:
-    """argv tokens to the raw dict the Args schema decodes, or the first usage error."""
+    params: tuple[_Param, ...], tokens: list[str]
+) -> dict[str, object] | UsageReason:
+    """argv tokens to the raw dict the Args schema decodes, or the first usage
+    reason."""
     options = {p.key: p for p in params if not p.positional}
     options |= {p.short: p for p in params if p.short is not None}
     positionals = [p for p in params if p.positional]
@@ -538,10 +534,10 @@ def _tokenize(
             name, eq, inline = token, "", ""
         param = options.get(name)
         if param is None:
-            return UnknownOption(command_path, usage, name)
+            return UnknownOption(name)
         if param.flag:
             if eq:
-                return UnexpectedOptionValue(command_path, usage, name, inline)
+                return UnexpectedOptionValue(name, inline)
             raw[param.key] = True
             continue
         if eq:
@@ -550,7 +546,7 @@ def _tokenize(
             value = tokens[i]
             i += 1
         else:
-            return MissingOptionValue(command_path, usage, name)
+            return MissingOptionValue(name)
         if param.repeated:
             raw.setdefault(param.key, [])
             typing.cast(list[str], raw[param.key]).append(value)
@@ -564,7 +560,7 @@ def _tokenize(
         else:
             raw[param.key] = extra.pop(0)
     if extra:
-        return UnexpectedArgument(command_path, usage, extra[0])
+        return UnexpectedArgument(extra[0])
     return raw
 
 

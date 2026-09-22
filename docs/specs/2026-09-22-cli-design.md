@@ -5,8 +5,8 @@ A typer replacement for effecton: declare a command's arguments as an annotated 
 ## Goals
 
 - A command's arguments are one `Cli.Args` class: a frozen, keyword-only dataclass whose annotations are the decoded types and whose `Annotated` metadata describes the command line. The handler receives the decoded instance and returns an `Effect`.
-- The whole CLI is one effect: `Cli.run(app)` has type `Effect[None, E | UsageError, R | E.Process.Protocol]` where `E` and `R` are the union of every handler's. `argv` is read through `E.Process`, which gains `argv()`. Services are provided once, at the root, and tests run a command with `E.run_sync` against Test services, pinning the arguments with `E.Process.Test(arguments=(...))`, instead of a `CliRunner`.
-- Parsing failures are typed usage errors that exit with status 2 through `E.run_main`; handler failures keep their own errors and exit with status 1.
+- The whole CLI is one effect: `Cli.run(app)` has type `Effect[None, E | Cli.UsageError, R | E.Process.Protocol]` where `E` and `R` are the union of every handler's. `argv` is read through `E.Process`, which gains `argv()`. Services are provided once, at the root, and tests run a command with `E.run_sync` against Test services, pinning the arguments with `E.Process.Test(arguments=(...))`, instead of a `CliRunner`.
+- Parsing failures are one `Cli.UsageError` carrying a `UsageReason` union, so `effect.catch(Cli.UsageError)` catches every parsing failure at once; it exits with status 2 through `E.run_main`. Handler failures keep their own errors and exit with status 1.
 - Text to value conversion and validation are `E.Schema` codecs whose encoded side is `str`, so `Cli.Option(schema=S.DateFromString)` and refinements through `.check(...)` work unchanged and every problem is reported at once with its option name.
 
 ## Non-goals (v1)
@@ -189,14 +189,28 @@ Rules:
 
 ## Errors
 
+Every parsing failure is one error class, `Cli.UsageError`, so `effect.catch(Cli.UsageError)(handler)` catches all of them:
+
 ```python
-type UsageError = (
+@final
+@dataclass(frozen=True)
+class UsageError(EffectonError):
+    command: str  # the command path, "changeset add"
+    usage: str  # that command's usage line, "Usage: changeset add [OPTIONS]"
+    reason: UsageReason
+    exit_code: ClassVar[int] = 2
+
+    def __str__(self) -> str:
+        return f"{self.usage}\nTry '{self.command} --help' for help.\n\n{self.reason}"
+
+
+type UsageReason = (
     UnknownOption | UnknownCommand | MissingCommand | MissingOptionValue
     | UnexpectedOptionValue | UnexpectedArgument | InvalidArguments
 )
 ```
 
-Each is a `@final` frozen `EffectonError` dataclass with `exit_code: ClassVar[int] = 2`, whose first two fields are `command: str` (the command path, `changeset add`) and `usage: str` (that command's usage line, `Usage: changeset add [OPTIONS]`). `__str__` renders:
+`UsageError.__str__` renders:
 
 ```
 Usage: changeset add [OPTIONS]
@@ -205,7 +219,9 @@ Try 'changeset add --help' for help.
 <reason>
 ```
 
-| Error | Extra fields | Reason |
+Each reason is a plain `@final` frozen dataclass (not an `EffectonError`; it never travels on its own, only inside `UsageError.reason`), carrying only its own fields, with `__str__` returning just the reason text embedded above:
+
+| Reason | Fields | Text |
 | --- | --- | --- |
 | `UnknownOption` | `option: str` | `No such option '--foo'.` (the token as given; a long option is cut at its first `=`, a short token is kept whole) |
 | `UnknownCommand` | `name: str` | `No such command 'foo'.` |
@@ -228,7 +244,7 @@ Through `E.run_main` a usage error is logged like any failure and exits with 2; 
 
 ## Testing
 
-- `test_cli.py` (Arrange-Act-Assert, handlers append the received `Args` to a list, arguments pinned through `E.Process.Test(arguments=...)`, `capsys` for output): option forms (`--name value`, `--name=value`, short), flags, positionals including optional and variadic, `--` handling, repeated scalar and tuple options, defaults and `None` optionals, every codec in the inference table, an explicit `schema=` with a refinement, nested subcommands two levels deep, `--help` at each level rendered byte-for-byte against the examples above, `--version` on a root defined in the test module printing `importlib.metadata.version("effecton")` and dying with the exact `RuntimeError` for a root whose recorded module is `__main__`, every `UsageError` with its exact `str`, `InvalidArguments` accumulating several issues, every definition-time `TypeError` message, and `run_main` integration for exit codes 0, 1 and 2.
+- `test_cli.py` (Arrange-Act-Assert, handlers append the received `Args` to a list, arguments pinned through `E.Process.Test(arguments=...)`, `capsys` for output): option forms (`--name value`, `--name=value`, short), flags, positionals including optional and variadic, `--` handling, repeated scalar and tuple options, defaults and `None` optionals, every codec in the inference table, an explicit `schema=` with a refinement, nested subcommands two levels deep, `--help` at each level rendered byte-for-byte against the examples above, `--version` on a root defined in the test module printing `importlib.metadata.version("effecton")` and dying with the exact `RuntimeError` for a root whose recorded module is `__main__`, every `UsageError` (one per reason) with its exact `str`, catching `Cli.UsageError` and matching on `.reason`, `InvalidArguments` accumulating several issues, every definition-time `TypeError` message, and `run_main` integration for exit codes 0, 1 and 2.
 - `test_types_cli.py`: `assert_type` pins for `Cli.command` in its three forms, `with_subcommands` producing the union of `E` and `R`, `Cli.run(app)` returning `Effect[None, E | UsageError, R | E.Process.Protocol]`, `Args` field and `__init__` types, and negative pins (handler with the wrong argument type, assigning to a frozen field, `with_subcommands` with a non-command) inside never-called underscore functions.
 - `test_process.py` covers `argv()` for `Live` (against `sys.argv`) and `Test`; `test_types_process.py` pins its type.
 - `test_schema.py` keeps passing after the struct builder refactor, and gains a case that `Annotated[int, "x"]` on an `S.Struct` field is treated as `int`.
