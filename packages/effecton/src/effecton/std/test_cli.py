@@ -302,3 +302,50 @@ def test_definition_time_errors(define, message):
         define()
 
     assert str(info.value) == message
+
+
+def test_command_exposes_its_name_and_help():
+    add = Cli.command(
+        "add", args=Add, handler=lambda args: E.success(None), help="Add."
+    )
+
+    assert (add.name, add.help) == ("add", "Add.")
+
+
+def test_with_subcommands_rejects_a_command_with_a_handler():
+    leaf = Cli.command("leaf", handler=lambda: E.success(None))
+
+    with pytest.raises(TypeError) as info:
+        leaf.with_subcommands(Cli.command("x"))
+
+    assert str(info.value) == "leaf: a command has either a handler or subcommands"
+
+
+def test_with_subcommands_can_only_be_set_once():
+    app = Cli.command("app").with_subcommands(Cli.command("x"))
+
+    with pytest.raises(TypeError) as info:
+        app.with_subcommands(Cli.command("y"))
+
+    assert str(info.value) == "app: subcommands are already set"
+
+
+def test_with_subcommands_rejects_duplicate_names():
+    with pytest.raises(TypeError) as info:
+        Cli.command("app").with_subcommands(Cli.command("x"), Cli.command("x"))
+
+    assert str(info.value) == "app: two subcommands are named 'x'"
+
+
+def test_usage_errors_render_usage_and_a_help_hint():
+    error = Cli.UnknownOption(
+        "changeset add", "Usage: changeset add [OPTIONS]", "--foo"
+    )
+
+    assert str(error) == (
+        "Usage: changeset add [OPTIONS]\n"
+        "Try 'changeset add --help' for help.\n"
+        "\n"
+        "No such option '--foo'."
+    )
+    assert error.exit_code == 2

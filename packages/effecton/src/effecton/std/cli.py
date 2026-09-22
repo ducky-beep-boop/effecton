@@ -12,14 +12,104 @@ exits with status 2 under run_main.
 """
 
 import dataclasses
+import sys
 import typing
+from collections.abc import Callable
 from dataclasses import MISSING, dataclass
 from datetime import date, datetime
 from types import NoneType, UnionType
-from typing import Any, ClassVar, TypeAliasType, dataclass_transform, final
+from typing import (
+    Any,
+    ClassVar,
+    Generic,
+    Never,
+    TypeAliasType,
+    TypeVar,
+    dataclass_transform,
+    final,
+    overload,
+)
 
+from effecton.effect import Effect, EffectonError
 from effecton.std import schema as S
 from effecton.std.path import Path
+
+
+@overload
+def command[T: Args, E: EffectonError, R](
+    name: str,
+    *,
+    help: str = "",
+    args: type[T],
+    handler: Callable[[T], Effect[None, E, R]],
+) -> Command[E, R]: ...
+
+
+@overload
+def command[E: EffectonError, R](
+    name: str, *, help: str = "", handler: Callable[[], Effect[None, E, R]]
+) -> Command[E, R]: ...
+
+
+@overload
+def command(name: str, *, help: str = "") -> Command[Never, Never]: ...
+
+
+def command(
+    name: str,
+    *,
+    help: str = "",
+    args: type[Args] | None = None,
+    handler: Callable[..., Effect[None, Any, Any]] | None = None,
+) -> Command[Any, Any]:
+    """A command: a handler over an Args class, a handler alone, or a parent
+    for with_subcommands. The caller's module is recorded for --version."""
+    module = sys._getframe(1).f_globals.get("__name__", "__main__")
+    return Command(name, help, module, args, handler, ())
+
+
+# Old-style TypeVars declare the covariance ty cannot infer for a class that
+# refers to itself in with_subcommands; see the ty notes in CLAUDE.md.
+_E = TypeVar("_E", bound=EffectonError, covariant=True)
+_R = TypeVar("_R", covariant=True)
+
+
+@final
+class Command(Generic[_E, _R]):  # noqa: UP046
+    """A named command: E and R are the union over every handler beneath it."""
+
+    def __init__(
+        self,
+        name: str,
+        help: str,
+        module: str,
+        args: type[Args] | None,
+        handler: Callable[..., Effect[None, Any, Any]] | None,
+        subcommands: tuple[Command[Any, Any], ...],
+    ) -> None:
+        self.name = name
+        self.help = help
+        self._module = module
+        self._args = args
+        self._handler = handler
+        self._subcommands = subcommands
+
+    def with_subcommands[E2: EffectonError, R2](
+        self, *commands: Command[E2, R2]
+    ) -> Command[_E | E2, _R | R2]:
+        """A copy of this command that dispatches to the given subcommands."""
+        if self._handler is not None:
+            raise TypeError(
+                f"{self.name}: a command has either a handler or subcommands"
+            )
+        if self._subcommands:
+            raise TypeError(f"{self.name}: subcommands are already set")
+        seen: set[str] = set()
+        for sub in commands:
+            if sub.name in seen:
+                raise TypeError(f"{self.name}: two subcommands are named {sub.name!r}")
+            seen.add(sub.name)
+        return Command(self.name, self.help, self._module, None, None, commands)
 
 
 @final
@@ -89,6 +179,113 @@ class Args:
             return (param.key, param.codec)
 
         cls.__cli_schema__ = S._struct_schema(cls, resolve)
+
+
+@final
+@dataclass(frozen=True)
+class UnknownOption(EffectonError):
+    command: str
+    usage: str
+    option: str
+    exit_code: ClassVar[int] = 2
+
+    def __str__(self) -> str:
+        return _usage_error(self, f"No such option '{self.option}'.")
+
+
+@final
+@dataclass(frozen=True)
+class UnknownCommand(EffectonError):
+    command: str
+    usage: str
+    name: str
+    exit_code: ClassVar[int] = 2
+
+    def __str__(self) -> str:
+        return _usage_error(self, f"No such command '{self.name}'.")
+
+
+@final
+@dataclass(frozen=True)
+class MissingCommand(EffectonError):
+    command: str
+    usage: str
+    exit_code: ClassVar[int] = 2
+
+    def __str__(self) -> str:
+        return _usage_error(self, "Missing command.")
+
+
+@final
+@dataclass(frozen=True)
+class MissingOptionValue(EffectonError):
+    command: str
+    usage: str
+    option: str
+    exit_code: ClassVar[int] = 2
+
+    def __str__(self) -> str:
+        return _usage_error(self, f"Option '{self.option}' requires a value.")
+
+
+@final
+@dataclass(frozen=True)
+class UnexpectedOptionValue(EffectonError):
+    command: str
+    usage: str
+    option: str
+    value: str
+    exit_code: ClassVar[int] = 2
+
+    def __str__(self) -> str:
+        return _usage_error(self, f"Option '{self.option}' does not take a value.")
+
+
+@final
+@dataclass(frozen=True)
+class UnexpectedArgument(EffectonError):
+    command: str
+    usage: str
+    argument: str
+    exit_code: ClassVar[int] = 2
+
+    def __str__(self) -> str:
+        return _usage_error(self, f"Got unexpected extra argument '{self.argument}'.")
+
+
+@final
+@dataclass(frozen=True)
+class InvalidArguments(EffectonError):
+    command: str
+    usage: str
+    issues: tuple[S.Issue, ...]
+    exit_code: ClassVar[int] = 2
+
+    def __str__(self) -> str:
+        def describe(issue: S.Issue) -> str:
+            head, *rest = issue.path
+            if isinstance(issue, S.MissingKey):
+                kind = "option" if str(head).startswith("--") else "argument"
+                return f"Missing {kind} '{head}'."
+            body = str(dataclasses.replace(issue, path=tuple(rest)))
+            return f"Invalid value for '{head}': {body}"
+
+        return _usage_error(self, "\n".join(describe(issue) for issue in self.issues))
+
+
+type UsageError = (
+    UnknownOption
+    | UnknownCommand
+    | MissingCommand
+    | MissingOptionValue
+    | UnexpectedOptionValue
+    | UnexpectedArgument
+    | InvalidArguments
+)
+
+
+def _usage_error(error: Any, reason: str) -> str:
+    return f"{error.usage}\nTry '{error.command} --help' for help.\n\n{reason}"
 
 
 def _plan_params(cls: type[Any]) -> tuple[_Param, ...]:
