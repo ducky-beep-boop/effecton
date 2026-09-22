@@ -5,13 +5,13 @@ A typer replacement for effecton: declare a command's arguments as an annotated 
 ## Goals
 
 - A command's arguments are one `Cli.Args` class: a frozen, keyword-only dataclass whose annotations are the decoded types and whose `Annotated` metadata describes the command line. The handler receives the decoded instance and returns an `Effect`.
-- The whole CLI is one effect: `Cli.run(app)(argv)` has type `Effect[None, E | UsageError, R]` where `E` and `R` are the union of every handler's. Services are provided once, at the root, and tests run a command with `E.run_sync` against Test services instead of a `CliRunner`.
+- The whole CLI is one effect: `Cli.run(app)` has type `Effect[None, E | UsageError, R | E.Process.Protocol]` where `E` and `R` are the union of every handler's. `argv` is read through `E.Process`, which gains `argv()`. Services are provided once, at the root, and tests run a command with `E.run_sync` against Test services, pinning the arguments with `E.Process.Test(arguments=(...))`, instead of a `CliRunner`.
 - Parsing failures are typed usage errors that exit with status 2 through `E.run_main`; handler failures keep their own errors and exit with status 1.
 - Text to value conversion and validation are `E.Schema` codecs whose encoded side is `str`, so `Cli.Option(schema=S.DateFromString)` and refinements through `.check(...)` work unchanged and every problem is reported at once with its option name.
 
 ## Non-goals (v1)
 
-Environment variable fallback, shell completion, grouped short flags (`-vq`), `--no-flag` forms, prompts, colors, help text wrapping, options on a command that also has subcommands (git-style global options), reading `argv` through a service, and a console service for output (handlers print through `E.sync(lambda: print(...))`).
+Environment variable fallback, shell completion, grouped short flags (`-vq`), `--no-flag` forms, prompts, colors, help text wrapping, options on a command that also has subcommands (git-style global options), deriving the version from installed metadata inside the library, and a console service for output (handlers print through `E.sync(lambda: print(...))`).
 
 ## Placement
 
@@ -25,7 +25,11 @@ Three layers, each a pure function over the previous one:
 2. **Tokenizing.** `argv` tokens are matched against the command tree and, for the leaf command, against its option and argument table, producing a raw `dict[str, object]` keyed by display name: `str` for a valued option or positional, `True` for a flag, `list[str]` for a repeated field. Keys not given are absent, so struct defaults apply. This step knows nothing about types beyond "flag or value".
 3. **Decoding and running.** `S.decode(schema)(raw)` produces the `Args` instance or a `ParseError`, which becomes `InvalidArguments`. The handler runs with the instance.
 
-`--help` and `--version` short-circuit after tokenizing the command path and print to stdout through `sync(lambda: print(text, end=""))`.
+`Cli.run` starts by requiring `E.Process.Protocol` and reading `argv()`, then tokenizes. `--help` and `--version` short-circuit after tokenizing the command path and print to stdout through `sync(lambda: print(text, end=""))`.
+
+### Process.argv
+
+`E.Process.Protocol` gains `argv(self) -> Effect[tuple[str, ...]]`: the command-line arguments without the program name. `Live` returns `tuple(sys.argv[1:])` as a sync effect; `Test` gains a third plain field `arguments: tuple[str, ...] = ()`. The Process docs page and its docstring mention it.
 
 ## Declaration
 
@@ -103,7 +107,17 @@ app = Cli.command("changeset", help="Changeset-based changelog and version manag
 
 - `Cli.command(name, *, help="", args: type[T], handler: Callable[[T], Effect[None, E, R]]) -> Command[E, R]`; `Cli.command(name, *, help="", handler: Callable[[], Effect[None, E, R]]) -> Command[E, R]`; `Cli.command(name, *, help="") -> Command[Never, Never]`. All parameters after `name` are keyword-only so a class and a callable can never be confused positionally.
 - `Command[E, R]` is `@final`, immutable, covariant in both parameters (declared through old-style TypeVars, see the ty notes in `CLAUDE.md`), and exposes `name` and `help`. `with_subcommands(*commands: Command[E2, R2]) -> Command[E | E2, R | R2]` returns a new command; calling it on a command that has a handler, or twice, raises `TypeError("changeset: a command has either a handler or subcommands")` / `TypeError("changeset: subcommands are already set")`; two subcommands with the same name raise `TypeError("changeset: two subcommands are named 'add'")`. `Command` is not exported from `E`; it is reachable through `Cli.Command`.
-- `Cli.run(command, *, version: str | None = None) -> Callable[[Sequence[str]], Effect[None, E | UsageError, R]]`. `argv` excludes the program name; entry points pass `sys.argv[1:]`. `version` adds `--version` to the root command. The command's `name` is the program name in usage lines.
+- `Cli.run(command, *, version: str | None = None) -> Effect[None, E | UsageError, R | E.Process.Protocol]`. It is not curried: unlike `provide` and `catch`, nothing in its types needs the two-step form, and the arguments come from `E.Process.argv()` rather than a parameter. `version` adds `--version` to the root command; entry points pass `importlib.metadata.version("<distribution>")`, which reads the installed distribution's metadata (written from `pyproject.toml` at build time, present for published wheels and `uv sync` workspace installs alike) rather than the project file. The command's `name` is the program name in usage lines.
+
+```python
+def run() -> None:
+    E.run_main(
+        Cli.run(app, version=version("changesets"))
+        .provide(E.FileSystem.Protocol)(E.FileSystem.AsyncLive())
+        .provide(E.Process.Protocol)(E.Process.Live())
+        .provide(NameGenerator.Protocol)(NameGenerator.Live())
+    )
+```
 
 ## Parsing
 
@@ -198,15 +212,16 @@ Through `E.run_main` a usage error is logged like any failure and exits with 2; 
 
 ## Migration
 
-- **changesets**: `cli.py` builds the root command from `add`, `status`, `version` and `notes` `Command` values exported by the per-command modules and `run()` is `E.run_main(Cli.run(app)(sys.argv[1:]).provide(FileSystem)(...).provide(Process)(...).provide(NameGenerator)(...))`. `add`'s manual bump check becomes the `Literal` codec and the empty-message check the refinement shown above; `typer.echo` calls become `E.sync(lambda: print(...))` inside the handler effect. `test_cli.py` keeps its subprocess tests (exit codes and stderr contents are unchanged) and gains a usage-error case asserting exit code 2 and `Missing option '--package'.`.
-- **api-reference**: `api-reference generate --out PATH` keeps its shape with `Generate(Cli.Args)` holding `out: Annotated[E.Path, Cli.Option(help=...)] = E.Path("docs/src/pages/api.md")`.
-- **skills-cli**: one root command with `Install(Cli.Args)` holding `skill_url: Annotated[str, Cli.Argument(help=...)]`. `cli.py` exports `app` and `run()`; `test_cli.py` drops `CliRunner` and the monkeypatching and runs `E.run_sync(Cli.run(app)(["https://…"]).provide(...)(Test services))`, asserting stdout through `capsys` and failures through `E.run_sync_exit`. The `@todo` comment goes.
+- **changesets**: `cli.py` builds the root command from `add`, `status`, `version` and `notes` `Command` values exported by the per-command modules and `run()` is the entry point shown above. `add`'s manual bump check becomes the `Literal` codec and the empty-message check the refinement shown above; `typer.echo` calls become `E.sync(lambda: print(...))` inside the handler effect. `test_cli.py` keeps its subprocess tests (exit codes and stderr contents are unchanged) and gains a usage-error case asserting exit code 2 and `Missing option '--package'.`.
+- **api-reference**: `api-reference generate --out PATH` keeps its shape with `Generate(Cli.Args)` holding `out: Annotated[E.Path, Cli.Option(help=...)] = E.Path("docs/src/pages/api.md")`; the entry point now also provides `E.Process.Live()`.
+- **skills-cli**: one root command with `Install(Cli.Args)` holding `skill_url: Annotated[str, Cli.Argument(help=...)]`. `cli.py` exports `app` and `run()`; `test_cli.py` drops `CliRunner` and the monkeypatching and runs `E.run_sync(Cli.run(app).provide(E.Process.Protocol)(E.Process.Test(arguments=("https://…",))).provide(...)(other Test services))`, asserting stdout through `capsys` and failures through `E.run_sync_exit`. The `@todo` comment goes.
 - `typer` is removed from the three `pyproject.toml` files and the lockfile.
 
 ## Testing
 
-- `test_cli.py` (Arrange-Act-Assert, handlers append the received `Args` to a list, `capsys` for output): option forms (`--name value`, `--name=value`, short), flags, positionals including optional and variadic, `--` handling, repeated scalar and tuple options, defaults and `None` optionals, every codec in the inference table, an explicit `schema=` with a refinement, nested subcommands two levels deep, `--help` at each level rendered byte-for-byte against the examples above, `--version`, every `UsageError` with its exact `str`, `InvalidArguments` accumulating several issues, every definition-time `TypeError` message, and `run_main` integration for exit codes 0, 1 and 2.
-- `test_types_cli.py`: `assert_type` pins for `Cli.command` in its three forms, `with_subcommands` producing the union of `E` and `R`, `Cli.run` returning `Effect[None, E | UsageError, R]`, `Args` field and `__init__` types, and negative pins (handler with the wrong argument type, assigning to a frozen field, `with_subcommands` with a non-command) inside never-called underscore functions.
+- `test_cli.py` (Arrange-Act-Assert, handlers append the received `Args` to a list, arguments pinned through `E.Process.Test(arguments=...)`, `capsys` for output): option forms (`--name value`, `--name=value`, short), flags, positionals including optional and variadic, `--` handling, repeated scalar and tuple options, defaults and `None` optionals, every codec in the inference table, an explicit `schema=` with a refinement, nested subcommands two levels deep, `--help` at each level rendered byte-for-byte against the examples above, `--version`, every `UsageError` with its exact `str`, `InvalidArguments` accumulating several issues, every definition-time `TypeError` message, and `run_main` integration for exit codes 0, 1 and 2.
+- `test_types_cli.py`: `assert_type` pins for `Cli.command` in its three forms, `with_subcommands` producing the union of `E` and `R`, `Cli.run` returning `Effect[None, E | UsageError, R | E.Process.Protocol]`, `Args` field and `__init__` types, and negative pins (handler with the wrong argument type, assigning to a frozen field, `with_subcommands` with a non-command) inside never-called underscore functions.
+- `test_process.py` covers `argv()` for `Live` (against `sys.argv`) and `Test`; `test_types_process.py` pins its type.
 - `test_schema.py` keeps passing after the struct builder refactor, and gains a case that `Annotated[int, "x"]` on an `S.Struct` field is treated as `int`.
 
 ## Risks
