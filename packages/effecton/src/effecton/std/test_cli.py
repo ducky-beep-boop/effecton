@@ -1,4 +1,5 @@
 import dataclasses
+import importlib.metadata
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -120,7 +121,7 @@ def test_params_carry_display_names_metavars_and_shapes():
     assert params["verbose"].flag is True
     assert params["verbose"].metavar is None
     add = {p.field: p for p in Add.__cli_params__}
-    assert add["message"].metavar == "VALUE"
+    assert add["message"].metavar == "TEXT"
     assert add["dry_run"].short == "-n"
     assert add["package"].required is True
     assert add["dry_run"].required is False
@@ -568,4 +569,162 @@ def test_usage_line_lists_positionals():
                 "cp", "Usage: cp [OPTIONS] FIRST [SECOND] [REST]...", "--nope"
             )
         )
+    )
+
+
+ADD_HELP = """\
+Usage: changeset add [OPTIONS]
+
+Create a changeset from the given package, bump level, and message.
+
+Options:
+  --package TEXT              Package the change belongs to. [required]
+  --bump [major|minor|patch]  major, minor, or patch. [required]
+  --message TEXT              Changelog entry for the change. [required]
+  -n, --dry-run               Print the changeset instead of writing it.
+  --help                      Show this message and exit.
+"""
+
+ROOT_HELP = """\
+Usage: changeset [OPTIONS] COMMAND [ARGS]...
+
+Changeset-based changelog and version management.
+
+Options:
+  --version  Show the version and exit.
+  --help     Show this message and exit.
+
+Commands:
+  add      Create a changeset from the given package, bump level, and message.
+  status   Show pending changesets and the releases they would produce.
+  version  Apply pending changesets: bump versions and update changelogs.
+  notes    Print the latest released CHANGELOG section for a package.
+"""
+
+
+def documented_app():
+    quiet = lambda *args: E.success(None)  # noqa: E731
+    return Cli.command(
+        "changeset", help="Changeset-based changelog and version management."
+    ).with_subcommands(
+        Cli.command(
+            "add",
+            args=Add,
+            handler=quiet,
+            help="Create a changeset from the given package, bump level, and message.",
+        ),
+        Cli.command(
+            "status",
+            handler=quiet,
+            help="Show pending changesets and the releases they would produce.",
+        ),
+        Cli.command(
+            "version",
+            handler=quiet,
+            help="Apply pending changesets: bump versions and update changelogs.",
+        ),
+        Cli.command(
+            "notes",
+            args=Notes,
+            handler=quiet,
+            help="Print the latest released CHANGELOG section for a package.",
+        ),
+    )
+
+
+def test_leaf_help_is_rendered_exactly(capsys):
+    exit = run_cli(documented_app(), "add", "--help")
+
+    assert exit == E.Succeeded(None)
+    assert capsys.readouterr().out == ADD_HELP
+
+
+def test_root_help_is_rendered_exactly(capsys):
+    exit = run_cli(documented_app(), "--help")
+
+    assert exit == E.Succeeded(None)
+    assert capsys.readouterr().out == ROOT_HELP
+
+
+def test_help_wins_over_other_tokens(capsys):
+    exit = run_cli(documented_app(), "add", "--bogus", "--help")
+
+    assert exit == E.Succeeded(None)
+    assert capsys.readouterr().out == ADD_HELP
+
+
+def test_help_after_double_dash_is_positional():
+    exit = run_cli(documented_app(), "notes", "--", "--help")
+
+    assert exit == E.Succeeded(None)
+
+
+def test_arguments_section_and_defaults(capsys):
+    class Copy(Cli.Args):
+        source: Annotated[E.Path, Cli.Argument(help="What to copy.")]
+        dest: Annotated[E.Path, Cli.Argument(help="Where to.")] = E.Path("out")
+        tags: Annotated[tuple[str, ...], Cli.Option(help="Tags.")] = ("a", "b")
+        port: Annotated[int | None, Cli.Option(help="Port.")] = None
+        secret: str = "s"
+
+    cmd = Cli.command("cp", args=Copy, handler=lambda a: E.success(None), help="Copy.")
+
+    run_cli(cmd, "--help")
+
+    assert capsys.readouterr().out == (
+        "Usage: cp [OPTIONS] SOURCE [DEST]\n"
+        "\n"
+        "Copy.\n"
+        "\n"
+        "Arguments:\n"
+        "  SOURCE  What to copy. [required]\n"
+        "  DEST    Where to. [default: out]\n"
+        "\n"
+        "Options:\n"
+        "  --tags TEXT     Tags. [default: a, b]\n"
+        "  --port INTEGER  Port.\n"
+        "  --secret TEXT   [default: s]\n"
+        "  --help          Show this message and exit.\n"
+    )
+
+
+def test_a_command_with_neither_handler_nor_subcommands_prints_help(capsys):
+    exit = run_cli(Cli.command("empty", help="Nothing yet."), "anything")
+
+    assert exit == E.Succeeded(None)
+    assert capsys.readouterr().out == (
+        "Usage: empty [OPTIONS]\n\nNothing yet.\n\nOptions:\n"
+        "  --version  Show the version and exit.\n"
+        "  --help     Show this message and exit.\n"
+    )
+
+
+def test_version_prints_the_distribution_version(capsys):
+    exit = run_cli(documented_app(), "--version")
+
+    assert exit == E.Succeeded(None)
+    assert (
+        capsys.readouterr().out
+        == f"changeset {importlib.metadata.version('effecton')}\n"
+    )
+
+
+def test_version_on_a_subcommand_is_an_unknown_option():
+    exit = run_cli(documented_app(), "add", "--version")
+
+    assert exit == E.Failure(
+        E.Fail(Cli.UnknownOption("changeset add", ADD_USAGE, "--version"))
+    )
+
+
+def test_version_dies_when_no_distribution_owns_the_module():
+    root = Cli.Command("prog", "", "__main__", None, None, ())
+
+    exit = run_cli(root, "--version")
+
+    assert isinstance(exit, E.Failure)
+    assert isinstance(exit.cause, E.Die)
+    assert str(exit.cause.defect) == (
+        "prog: cannot determine the version: module '__main__' belongs to no "
+        "installed distribution"
     )

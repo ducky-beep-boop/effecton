@@ -12,6 +12,7 @@ exits with status 2 under run_main.
 """
 
 import dataclasses
+import importlib.metadata
 import sys
 import typing
 from collections.abc import Callable
@@ -369,7 +370,7 @@ def _plan_params(cls: type[Any]) -> tuple[_Param, ...]:
             if spec.schema is None:
                 codec, metavar = _text_codec(inner, where)
             else:
-                codec, metavar = spec.schema, "VALUE"
+                codec, metavar = spec.schema, _metavar_for(inner) or "VALUE"
             if spec.metavar is not None:
                 metavar = spec.metavar
             if optional:
@@ -449,6 +450,19 @@ def _text_codec(annotation: Any, where: str) -> tuple[S.Schema[Any, str], str]:
     )
 
 
+def _metavar_for(annotation: Any) -> str | None:
+    """The metavar inferable for an annotation, or None when it has none.
+
+    Used for a field with an explicit schema=: the annotation still picks the
+    metavar when it is one of the standard inferable types, falling back to
+    VALUE only when it is not (which is also why a schema was required).
+    """
+    try:
+        return _text_codec(annotation, "")[1]
+    except TypeError:
+        return None
+
+
 def _optional(codec: S.Schema[Any, Any]) -> S.Schema[Any, Any]:
     """Decode as the codec does (the wire never carries None); encode None as None."""
 
@@ -466,7 +480,12 @@ def _dispatch(
 ) -> Effect[None, Any, Any]:
     command_path = " ".join(path)
     usage = _usage_line(command, command_path)
+    is_root = command is root
     if command._subcommands:
+        if tokens and tokens[0] == "--help":
+            return _print(_help(command, command_path, is_root))
+        if is_root and tokens and tokens[0] == "--version":
+            return sync(lambda: print(f"{root.name} {_distribution_version(root)}"))
         if not tokens:
             return fail(MissingCommand(command_path, usage))
         if tokens[0].startswith("-"):
@@ -476,13 +495,19 @@ def _dispatch(
             return fail(UnknownCommand(command_path, usage, tokens[0]))
         return _dispatch(sub, [*path, sub.name], tokens[1:], root)
 
+    before_separator = tokens[: tokens.index("--")] if "--" in tokens else tokens
+    if "--help" in before_separator:
+        return _print(_help(command, command_path, is_root))
+    if is_root and "--version" in before_separator:
+        return sync(lambda: print(f"{root.name} {_distribution_version(root)}"))
+    if command._handler is None:
+        return _print(_help(command, command_path, is_root))
+
     params = () if command._args is None else command._args.__cli_params__
     raw = _tokenize(params, command_path, usage, tokens)
     if isinstance(raw, EffectonError):
         return fail(raw)
     handler = command._handler
-    if handler is None:
-        return sync(lambda: None)  # replaced by help in Task 6
     if command._args is None:
         return handler()
     return (
@@ -560,3 +585,77 @@ def _usage_line(command: Command[Any, Any], command_path: str) -> str:
             name = p.key if p.required else f"[{p.key}]"
             parts.append(f"{name}..." if p.repeated else name)
     return " ".join(parts)
+
+
+def _print(text: str) -> Effect[None]:
+    return sync(lambda: print(text, end=""))
+
+
+def _help(command: Command[Any, Any], command_path: str, is_root: bool) -> str:
+    def describe(p: _Param) -> str:
+        parts = [p.help] if p.help else []
+        if p.required:
+            parts.append("[required]")
+        elif p.default_text is not None:
+            parts.append(f"[default: {p.default_text}]")
+        return " ".join(parts)
+
+    def option_left(p: _Param) -> str:
+        left = f"{p.short}, {p.key}" if p.short is not None else p.key
+        return left if p.flag else f"{left} {p.metavar}"
+
+    def table(rows: list[tuple[str, str]]) -> list[str]:
+        width = max(len(left) for left, _ in rows)
+        return [f"  {left:<{width}}  {right}".rstrip() for left, right in rows]
+
+    params = () if command._args is None else command._args.__cli_params__
+    arguments = [(p.key, describe(p)) for p in params if p.positional]
+    options = [(option_left(p), describe(p)) for p in params if not p.positional]
+    if is_root and command._handler is None:
+        options.append(("--version", "Show the version and exit."))
+    options.append(("--help", "Show this message and exit."))
+    commands = [(c.name, c.help) for c in command._subcommands]
+    lines = [_usage_line(command, command_path)]
+    if command.help:
+        lines += ["", command.help]
+    for title, rows in (
+        ("Arguments:", arguments),
+        ("Options:", options),
+        ("Commands:", commands),
+    ):
+        if rows:
+            lines += ["", title, *table(rows)]
+    return "\n".join(lines) + "\n"
+
+
+def _distribution_version(root: Command[Any, Any]) -> str:
+    """The installed version of the distribution owning the root command's module.
+
+    Editable installs are missing from packages_distributions(), so a
+    package that maps to nothing is tried as a distribution name itself.
+    """
+    module = root._module
+    package = module.split(".")[0]
+    names: list[str] = []
+    if package != "__main__":
+        names = sorted(
+            set(importlib.metadata.packages_distributions().get(package, []))
+        )
+        if not names:
+            try:
+                importlib.metadata.version(package)
+            except importlib.metadata.PackageNotFoundError:
+                pass
+            else:
+                names = [package]
+    if not names:
+        raise RuntimeError(
+            f"{root.name}: cannot determine the version: module {module!r} "
+            "belongs to no installed distribution"
+        )
+    if len(names) > 1:
+        raise RuntimeError(
+            f"{root.name}: cannot determine the version: module {module!r} "
+            f"belongs to several installed distributions: {', '.join(names)}"
+        )
+    return importlib.metadata.version(names[0])
